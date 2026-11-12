@@ -94,9 +94,9 @@ class FADEx:
             The dataset in the reduced dimension after transformation by DR algorithm.
             If you want to visualize FADEx explanations, the reduced dimension must be 2.
 
-        n_neighbors : int
+        n_neighbors : int, optional
             Number of neighbors used in the Jacobian approximation. Recommended: 10% of
-            the dataset size.
+            the dataset size. If None, the whole dataset is used.
 
         feature_names : list, optional
             List with the feature names. If None, standard names (feature_0, feature_1, ...)
@@ -105,13 +105,15 @@ class FADEx:
         class_names : list, optional, shape (n_samples,)
             List with the class name for each instance. If None, class names won't be displayed.
 
-        remove_const_feat : bool, default=True
+        remove_const_feat : bool, default=False
             Removes near-constant features (variance < 1e-6) before computing the local
-            Jacobian. This helps deal with the curse of dimensionality.
+            Jacobian. This helps deal with the curse of dimensionality. Recommended,
+            together with use_pca, for data with more than about 50 features.
 
-        use_pca : bool, default=True
+        use_pca : bool, default=False
             Applies PCA retaining 95% of variance before Jacobian estimation, further
-            reducing the effective dimensionality.
+            reducing the effective dimensionality. Recommended, together with
+            remove_const_feat, for data with more than about 50 features.
 
         ridge_lambda : float, default=0.1
             Regularization strength for the weighted ridge least-squares Jacobian estimation.
@@ -133,17 +135,56 @@ class FADEx:
         self.all_norms = None
         self.all_jacs  = None
 
-        self.high_dim_data = np.array(high_dim_data)
-        self.low_dim_data  = np.array(low_dim_data)
+        # Always work in floating point: integer inputs (e.g. raw pixel counts)
+        # would otherwise truncate the importance scores to integers.
+        self.high_dim_data = np.asarray(high_dim_data, dtype=np.float64)
+        self.low_dim_data  = np.asarray(low_dim_data,  dtype=np.float64)
 
-        self.n_samples  = len(self.high_dim_data)
-        self.n_features = len(self.high_dim_data[0])
+        if self.high_dim_data.ndim != 2 or self.low_dim_data.ndim != 2:
+            raise ValueError(
+                "high_dim_data and low_dim_data must be 2-D arrays of shape "
+                "(n_samples, n_features) and (n_samples, reduced_dimension); got "
+                f"{self.high_dim_data.shape} and {self.low_dim_data.shape}."
+            )
+        if len(self.high_dim_data) != len(self.low_dim_data):
+            raise ValueError(
+                "high_dim_data and low_dim_data must have the same number of rows; got "
+                f"{len(self.high_dim_data)} and {len(self.low_dim_data)}."
+            )
+        if not (np.isfinite(self.high_dim_data).all() and np.isfinite(self.low_dim_data).all()):
+            raise ValueError("high_dim_data and low_dim_data must not contain NaN or infinite values.")
+
+        self.n_samples  = self.high_dim_data.shape[0]
+        self.n_features = self.high_dim_data.shape[1]
+
+        if n_neighbors is not None:
+            if int(n_neighbors) != n_neighbors or not (2 <= n_neighbors <= self.n_samples):
+                raise ValueError(
+                    f"n_neighbors must be an integer between 2 and n_samples ({self.n_samples}), "
+                    f"or None to use the whole dataset; got {n_neighbors!r}."
+                )
+            self.n_neighbors = int(n_neighbors)
 
         # Use generic labels when no feature names are provided
         if feature_names is None:
             self.feature_names = [f"feature_{i}" for i in range(self.n_features)]
         else:
+            if len(feature_names) != self.n_features:
+                raise ValueError(
+                    f"feature_names has {len(feature_names)} entries but the data has "
+                    f"{self.n_features} features."
+                )
             self.feature_names = feature_names
+
+        if class_names is not None and len(class_names) != self.n_samples:
+            raise ValueError(
+                f"class_names has {len(class_names)} entries but the data has {self.n_samples} samples."
+            )
+
+        # Neighbour search structures, built once and reused across fit() calls
+        self._nn_index     = None   # fitted NearestNeighbors over high_dim_data
+        self._nbr_table    = None   # (n_samples, n_neighbors) indices, filled by _fit_all()
+        self._nbr_table_k  = None
 
     # -----------------------------------------------------------------------
     # Private helpers
@@ -198,16 +239,15 @@ class FADEx:
         '''
         Derives per-feature importance scores from the Jacobian via SVD.
         '''
-        _, S, VT = np.linalg.svd(jacobian, full_matrices=True)
-        V = VT.T
+        # Only the leading d right-singular vectors (d = layout dimension) are needed.
+        _, S, VT = np.linalg.svd(jacobian, full_matrices=False)
+        x = np.asarray(x, dtype=np.float64)
 
-        if V.shape[1] < 2:
-            raise ValueError("Jacobian matrix does not have enough singular vectors.")
-
-        phi = np.zeros_like(x)
-        for j in range(len(x)):
-            phi[j] = (np.abs(V[j, 0] * x[j])
-                      + (S[1] / (S[0] + 1e-12)) * np.abs(V[j, 1] * x[j]))
+        # phi_j = sum_i (lambda_i / lambda_1) * |v_ij * x_j|   (Eq. 6 of the paper).
+        # For a 2-D layout this is |v_1j x_j| + (lambda_2 / lambda_1) |v_2j x_j|.
+        ratios = S / (S[0] + 1e-12)
+        ratios[0] = 1.0
+        phi = (ratios[:, None] * np.abs(VT * x[None, :])).sum(axis=0)
 
         if np.isnan(phi).any():
             raise ValueError('NaN values computed for phi.')
@@ -220,11 +260,24 @@ class FADEx:
         '''
         Returns the distances and indices of the k nearest neighbors of `point`
         within `data` using a ball-tree structure.
+
+        The tree over the full dataset is built once and reused; building it on
+        every call used to dominate the cost of fit().
         '''
-        nbrs = NearestNeighbors(n_neighbors=self.n_neighbors, algorithm='ball_tree', n_jobs=2)
-        nbrs.fit(data)
-        dist, indices = nbrs.kneighbors(point.reshape(1, -1))
+        if data is self.high_dim_data:
+            nbrs = self._neighbor_index()
+        else:
+            nbrs = NearestNeighbors(algorithm='ball_tree').fit(data)
+        dist, indices = nbrs.kneighbors(point.reshape(1, -1), n_neighbors=self.n_neighbors)
         return dist, indices
+
+    def _neighbor_index(self) -> NearestNeighbors:
+        '''
+        Returns the (lazily built, cached) nearest-neighbor index over high_dim_data.
+        '''
+        if self._nn_index is None:
+            self._nn_index = NearestNeighbors(algorithm='ball_tree').fit(self.high_dim_data)
+        return self._nn_index
 
     @staticmethod
     def _ridge_wls(X: np.ndarray, Y: np.ndarray, w: np.ndarray, lam: float) -> np.ndarray:
@@ -404,8 +457,12 @@ class FADEx:
             high_dim_nei = self.high_dim_data
             low_dim_nei  = self.low_dim_data
         else:
-            _, indices   = self._nearest_neighbors(data=self.high_dim_data, point=high_dim_point)
-            idx          = indices[0] if indices.ndim == 2 else indices
+            if self._nbr_table is not None and self._nbr_table_k == self.n_neighbors:
+                # Precomputed in one batched query by _fit_all()
+                idx      = self._nbr_table[explain_index]
+            else:
+                _, indices = self._nearest_neighbors(data=self.high_dim_data, point=high_dim_point)
+                idx        = indices[0] if indices.ndim == 2 else indices
             high_dim_nei = self.high_dim_data[idx]
             low_dim_nei  = self.low_dim_data[idx]
 
@@ -479,10 +536,21 @@ class FADEx:
             self.verbose = False
             switch = True
 
-        results = [
-            self.fit(i, show=False)
-            for i in tqdm(range(self.n_samples), desc="[FADEx] Processing Instances", unit="instance")
-        ]
+        # One batched neighbor query for the whole dataset instead of one per instance
+        if self.n_neighbors is not None:
+            self._nbr_table   = self._neighbor_index().kneighbors(
+                self.high_dim_data, n_neighbors=self.n_neighbors, return_distance=False
+            )
+            self._nbr_table_k = self.n_neighbors
+
+        try:
+            results = [
+                self.fit(i, show=False)
+                for i in tqdm(range(self.n_samples), desc="[FADEx] Processing Instances", unit="instance")
+            ]
+        finally:
+            # The table can be large (n_samples x n_neighbors); it is only needed here
+            self._nbr_table, self._nbr_table_k = None, None
 
         if switch:
             self.verbose = True
@@ -510,18 +578,23 @@ class FADEx:
 
         Returns
         -------
-        phi_cluster : np.ndarray, shape (n_features,)
-            Averaged importance scores over the cluster.
-        feature_names_top : list of str
-            Names of the top-n features.
+        dict with keys:
+            "phi_cluster"       — importance scores averaged over the cluster, shape (n_features,)
+            "feature_names_top" — names of the top-n features
         '''
-        phi_cluster = np.zeros(shape=self.n_features)
+        cluster_ids = np.asarray(cluster_ids, dtype=int)
+        if cluster_ids.size == 0:
+            raise ValueError("cluster_ids is empty.")
 
-        for idx in tqdm(cluster_ids):
-            phi_cluster += self.fit(idx, show=False, n_top=n_top)["phi"]
-
-        # Normalize by cluster size
-        phi_cluster /= len(cluster_ids)
+        if self.all_phis is not None:
+            # Reuse the results cached by _fit_all()
+            phi_cluster = np.asarray(self.all_phis)[cluster_ids].mean(axis=0)
+        else:
+            phi_cluster = np.zeros(shape=self.n_features)
+            for idx in tqdm(cluster_ids):
+                phi_cluster += self.fit(int(idx), show=False, n_top=n_top)["phi"]
+            # Normalize by cluster size
+            phi_cluster /= len(cluster_ids)
 
         _, feature_names_top = self._get_top_features(phi_cluster, n_top)
 
@@ -764,11 +837,13 @@ class FADEx:
             Additional multiplier applied to vector magnitudes.
         width, height : int
             Figure dimensions in inches.
-        save : bool, default=False
+        save_fig : bool, default=False
             If True, saves the plot as a PDF.
         """
 
         feat_idx, feat_name = self._resolve_feature(feature)
+        if labels is not None:
+            labels = np.asarray(labels)
 
         # --- Build 2D grid over the embedding ---
         x_data = self.low_dim_data[:, 0]

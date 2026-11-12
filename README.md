@@ -87,8 +87,8 @@ FADEx(
     n_neighbors     = None,
     feature_names   = None,
     class_names     = None,
-    remove_const_feat = True,
-    use_pca         = True,
+    remove_const_feat = False,
+    use_pca         = False,
     ridge_lambda    = 0.1,
     verbose         = False,
 )
@@ -108,8 +108,8 @@ FADEx(
 | `n_neighbors` | `None` | Number of neighbors for the local Jacobian estimation. `None` uses the entire dataset |
 | `feature_names` | `None` | List of feature names. Auto-generated if not provided |
 | `class_names` | `None` | Class label for each instance, used in plot tooltips |
-| `remove_const_feat` | `True` | Drops near-constant features before Jacobian estimation to reduce effective dimensionality |
-| `use_pca` | `True` | Applies PCA (95% variance retained) before Jacobian estimation to reduce effective dimensionality |
+| `remove_const_feat` | `False` | Drops near-constant features before Jacobian estimation to reduce effective dimensionality. Recommended, together with `use_pca`, for data with more than about 50 features |
+| `use_pca` | `False` | Applies PCA (95% variance retained) before Jacobian estimation to reduce effective dimensionality. Recommended, together with `remove_const_feat`, for data with more than about 50 features |
 | `ridge_lambda` | `0.1` | Regularization strength for the weighted ridge least-squares solver |
 | `verbose` | `False` | Prints debug information during computation |
 
@@ -130,14 +130,14 @@ result = fadex.fit(
 )
 ```
 
-Computes the FADEx explanation for a single instance. Returns a dict with keys `"phi"`, `"spectral_norm"`, `"jac"`, and `"feature_names_top"`. When `show=True`, displays a feature importance bar chart for that instance.
+Computes the FADEx explanation for a single instance. Returns a dict with keys `"phi"` (importance scores), `"SND"` (spectral norm of the Jacobian, the local distortion measure), `"jac"` (the estimated Jacobian), and `"feature_names_top"`. When `show=True`, displays a feature importance bar chart for that instance.
 
 ---
 
 ### `fit_cluster`
 
 ```python
-phi_cluster, feature_names_top = fadex.fit_cluster(
+result = fadex.fit_cluster(
     cluster_ids,
     n_top    = 10,
     show     = False,
@@ -145,7 +145,7 @@ phi_cluster, feature_names_top = fadex.fit_cluster(
 )
 ```
 
-Computes a cluster-level importance by averaging `phi` over all instances in `cluster_ids`. Useful for understanding which features drive a specific group of points in the embedding.
+Computes a cluster-level importance by averaging `phi` over all instances in `cluster_ids`. Returns a dict with keys `"phi_cluster"` and `"feature_names_top"`. Useful for understanding which features drive a specific group of points in the embedding.
 
 ---
 
@@ -168,12 +168,27 @@ Runs FADEx on the entire dataset, sums `phi` across all instances, and plots a g
 
 ```python
 fadex.interactive_plot(
-    width  = 10,
-    height = 8,
+    width         = 10,
+    height        = 8,
+    show_features = False,
 )
 ```
 
-Displays an interactive Plotly scatter plot of the 2D embedding. Points are colored by their spectral norm, and hovering over a point shows its feature importance breakdown.
+Displays an interactive Plotly scatter plot of the 2D embedding. Points are colored by their spectral norm, and hovering over a point shows its class, index and spectral norm. With `show_features=True` the tooltip also lists the feature importances.
+
+---
+
+### `plot_distortion`
+
+```python
+fadex.plot_distortion(
+    width    = 10,
+    height   = 10,
+    save_fig = False,
+)
+```
+
+Plots the 2D embedding colored by the SND distortion measure, with the color scale centered at 1 (cold colors below 1, warm colors above). SND compares embedding units with data units, so its absolute value depends on how both are scaled.
 
 ---
 
@@ -181,7 +196,7 @@ Displays an interactive Plotly scatter plot of the 2D embedding. Points are colo
 
 ```python
 fadex.plot_grid_feature_vectors(
-    features_to_plot,
+    feature,
     labels       = None,
     mask         = None,
     grid_bins    = 15,
@@ -189,13 +204,13 @@ fadex.plot_grid_feature_vectors(
     scale_factor = 1.0,
     width        = 12,
     height       = 10,
-    save         = False,
+    save_fig     = False,
 )
 ```
 
-Overlays Jacobian-based feature vectors on the 2D embedding using a grid. The embedding plane is divided into a `grid_bins × grid_bins` grid; for each occupied cell, the mean Jacobian is computed and the selected features are drawn as arrows. Arrow color encodes magnitude — vectors with norm ≥ 1 are capped to unit length and colored by their original magnitude.
+Overlays Jacobian-based feature vectors on the 2D embedding using a grid. The embedding plane is divided into a `grid_bins × grid_bins` grid; for each occupied cell, the mean Jacobian is computed and the selected feature is drawn as an arrow. Arrow color encodes magnitude — vectors with norm ≥ 1 are capped to unit length and colored by their original magnitude.
 
-`features_to_plot` accepts feature names (strings) or column indices (integers).
+`feature` accepts a feature name (string) or a column index (integer).
 
 ---
 
