@@ -91,6 +91,7 @@ FADEx(
     use_pca         = False,
     ridge_lambda    = 0.1,
     verbose         = False,
+    reference       = "mean",
 )
 ```
 
@@ -112,6 +113,7 @@ FADEx(
 | `use_pca` | `False` | Applies PCA (95% variance retained) before Jacobian estimation to reduce effective dimensionality. Recommended, together with `remove_const_feat`, for data with more than about 50 features |
 | `ridge_lambda` | `0.1` | Regularization strength for the weighted ridge least-squares solver |
 | `verbose` | `False` | Prints debug information during computation |
+| `reference` | `"mean"` | Reference point for the importance scores: the score of feature $j$ uses the displacement $x_j - \text{reference}_j$. `"mean"` uses the dataset mean, so scores do not change when a constant is added to a feature. `"zero"` uses the raw values, exactly as in the formula above; the two coincide for centered (e.g. standardized) data. An array with one value per feature is also accepted. The Jacobian, the influence vectors and SND do not depend on it |
 
 ---
 
@@ -131,6 +133,24 @@ result = fadex.fit(
 ```
 
 Computes the FADEx explanation for a single instance. Returns a dict with keys `"phi"` (importance scores), `"SND"` (spectral norm of the Jacobian, the local distortion measure), `"jac"` (the estimated Jacobian), and `"feature_names_top"`. When `show=True`, displays a feature importance bar chart for that instance.
+
+---
+
+### `fit_quality`
+
+```python
+quality = fadex.fit_quality(
+    indices      = None,
+    n_points     = None,
+    test_size    = 0.3,
+    random_state = 0,
+    baseline     = False,
+)
+```
+
+Checks whether the local linear model can be trusted. For each instance, the Jacobian is estimated from 70% of its neighbors and used to predict where the other 30% lie in the embedding. Returns a dict with the per-instance `"cosine"` (direction agreement) and `"pearson"` (agreement of displacement lengths), their averages `"mean_cosine"` and `"mean_pearson"`, and the evaluated `"indices"`. Use `n_points` to evaluate a random sample.
+
+An embedding unrelated to the data does **not** score 0 on the cosine measure. Pass `baseline=True` to also get `"baseline_cosine"` and `"baseline_pearson"`, the same scores for a randomly permuted embedding, and compare against those.
 
 ---
 

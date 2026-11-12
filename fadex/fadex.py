@@ -81,7 +81,7 @@ class FADEx:
                  n_neighbors: int = None, feature_names: list = None,
                  class_names: list = None, remove_const_feat: bool = False,
                  use_pca: bool = False, ridge_lambda: float = 0.1,
-                 verbose: bool = False):
+                 verbose: bool = False, reference="mean"):
         '''
         Local explainability method for dimensionality reduction (DR) algorithms.
 
@@ -120,6 +120,15 @@ class FADEx:
 
         verbose : bool, default=False
             If True, prints debug information during computation.
+
+        reference : "mean", "zero" or array-like of shape (n_features,), default="mean"
+            Reference point for the importance scores. The score of feature j uses the
+            displacement (x_j - reference_j), so it measures how far the instance is from
+            the reference on that feature, not the raw feature value.
+            "mean" uses the dataset mean, which makes the scores independent of any
+            constant added to a feature. "zero" uses the raw values, exactly as in Eq. 6
+            of the paper; the two coincide when the data is centered (e.g. standardized).
+            The Jacobian, the influence vectors and SND do not depend on this choice.
         '''
 
         # Hyperparameters
@@ -181,6 +190,22 @@ class FADEx:
                 f"class_names has {len(class_names)} entries but the data has {self.n_samples} samples."
             )
 
+        # Reference point for the importance scores
+        if isinstance(reference, str):
+            if reference == "mean":
+                self.reference_point = self.high_dim_data.mean(axis=0)
+            elif reference == "zero":
+                self.reference_point = np.zeros(self.n_features, dtype=np.float64)
+            else:
+                raise ValueError(f'reference must be "mean", "zero" or an array; got {reference!r}.')
+        else:
+            self.reference_point = np.asarray(reference, dtype=np.float64).ravel()
+            if self.reference_point.shape != (self.n_features,) or not np.isfinite(self.reference_point).all():
+                raise ValueError(
+                    f"reference must be a finite array with one value per feature ({self.n_features}); "
+                    f"got shape {np.shape(reference)}."
+                )
+
         # Neighbour search structures, built once and reused across fit() calls
         self._nn_index     = None   # fitted NearestNeighbors over high_dim_data
         self._nbr_table    = None   # (n_samples, n_neighbors) indices, filled by _fit_all()
@@ -238,6 +263,9 @@ class FADEx:
     def _compute_importance(self, jacobian: np.ndarray, x: np.ndarray) -> np.ndarray:
         '''
         Derives per-feature importance scores from the Jacobian via SVD.
+
+        `x` is the displacement of the instance from the reference point
+        (the raw feature vector when the reference is zero).
         '''
         # Only the leading d right-singular vectors (d = layout dimension) are needed.
         _, S, VT = np.linalg.svd(jacobian, full_matrices=False)
@@ -416,6 +444,54 @@ class FADEx:
     # Public API
     # -----------------------------------------------------------------------
 
+    def _estimate_jacobian(
+        self,
+        high_dim_point: np.ndarray,
+        low_dim_point: np.ndarray,
+        high_dim_nei: np.ndarray,
+        low_dim_nei: np.ndarray,
+    ) -> np.ndarray:
+        '''
+        Estimates the Jacobian at `high_dim_point` from the given neighbors:
+        optional preprocessing (constant-feature removal, local PCA), weighted
+        ridge least squares, then mapping back to the full feature space.
+
+        Returns
+        -------
+        jac : np.ndarray, shape (d, n_features)
+        '''
+        # --- Dimensionality reduction preprocessing ---
+        if self.remove_const_feat:
+            high_dim_point, high_dim_nei, keep_mask, _ = self._drop_const_features(
+                high_dim_point, high_dim_nei
+            )
+
+        if self.use_pca:
+            pca          = PCA(n_components=0.95, svd_solver='full')
+            high_dim_nei = pca.fit_transform(high_dim_nei)
+            high_dim_point = pca.transform(high_dim_point[None, :])[0]
+
+        if self.verbose: print(f'[FADEx] New Dimension: {high_dim_nei.shape[1]}')
+
+        # --- Jacobian estimation ---
+        jac = self._compute_jac_ls(high_dim_point, low_dim_point, high_dim_nei, low_dim_nei)
+
+        # Validate and sanitize
+        if np.any(np.isnan(jac)):
+            raise ValueError('NaN values computed for Jacobian.')
+        if np.any(np.isinf(jac)):
+            warnings.warn('Inf values computed for Jacobian. Turning them into 0 or max...')
+        jac = np.nan_to_num(jac)
+        jac = jac.astype(np.float32)
+
+        # --- Restore full feature space ---
+        if self.use_pca:
+            jac = jac @ pca.components_
+        if self.remove_const_feat:
+            jac = self._reinflate_jac(jac, keep_mask)
+
+        return jac
+
     def fit(self, explain_index: int, show: bool = True, width: int = 10,
             height: int = 8, n_top: int = 10, save_fig: bool = False) -> dict:
         '''
@@ -466,41 +542,11 @@ class FADEx:
             high_dim_nei = self.high_dim_data[idx]
             low_dim_nei  = self.low_dim_data[idx]
 
-        # Store the original point before any preprocessing
-        x0 = high_dim_point
-
-        # --- Dimensionality reduction preprocessing ---
-        if self.remove_const_feat:
-            high_dim_point, high_dim_nei, keep_mask, _ = self._drop_const_features(
-                high_dim_point, high_dim_nei
-            )
-
-        if self.use_pca:
-            pca          = PCA(n_components=0.95, svd_solver='full')
-            high_dim_nei = pca.fit_transform(high_dim_nei)
-            high_dim_point = pca.transform(high_dim_point[None, :])[0]
-
-        if self.verbose: print(f'[FADEx] New Dimension: {high_dim_nei.shape[1]}')
-
-        # --- Jacobian estimation ---
-        jac = self._compute_jac_ls(high_dim_point, low_dim_point, high_dim_nei, low_dim_nei)
-
-        # Validate and sanitize
-        if np.any(np.isnan(jac)):
-            raise ValueError('NaN values computed for Jacobian.')
-        if np.any(np.isinf(jac)):
-            warnings.warn('Inf values computed for Jacobian. Turning them into 0 or max...')
-        jac = np.nan_to_num(jac)
-        jac = jac.astype(np.float32)
-
-        # --- Restore full feature space ---
-        if self.use_pca:
-            jac = jac @ pca.components_
-        if self.remove_const_feat:
-            jac = self._reinflate_jac(jac, keep_mask)
+        # --- Preprocessing, Jacobian estimation, back to the full feature space ---
+        jac = self._estimate_jacobian(high_dim_point, low_dim_point, high_dim_nei, low_dim_nei)
 
         # --- Importance and distortion ---
-        phi           = self._compute_importance(jac, x0)
+        phi           = self._compute_importance(jac, high_dim_point - self.reference_point)
         SND = np.linalg.norm(jac, ord=2)
 
         if np.isnan(SND):
@@ -558,6 +604,128 @@ class FADEx:
         self.all_phis  = np.asarray([r["phi"]          for r in results])
         self.all_norms = np.asarray([r["SND"]          for r in results])
         self.all_jacs  = np.asarray([r["jac"]          for r in results])
+
+    def fit_quality(self, indices=None, n_points: Optional[int] = None,
+                    test_size: float = 0.3, random_state: int = 0,
+                    baseline: bool = False) -> dict:
+        '''
+        Hold-out check of the local linear model (Sec. 3.3 of the paper).
+
+        For each selected instance, the Jacobian is estimated from a random part
+        of its neighbors and used to predict where the remaining neighbors lie in
+        the embedding, relative to the instance. Two scale-free scores compare
+        the predicted and the actual displacements:
+
+        - cosine  : mean cosine similarity between them (1 = same direction,
+                    0 = unrelated). Tells whether the model places held-out
+                    neighbors in the right direction.
+        - pearson : Pearson correlation between their lengths. Tells whether
+                    larger real displacements are predicted as larger.
+
+        Low values mean the embedding is not locally linear around that instance
+        for this neighborhood size, so its explanation should not be trusted.
+
+        The cosine score of an embedding with no relation to the data is NOT zero:
+        the neighbors of an instance tend to lie on one side of it in both spaces
+        (towards the bulk of the data), which a linear model picks up. Use
+        `baseline=True` to measure that chance level on your data and compare
+        "mean_cosine" against "baseline_cosine" rather than against 0.
+
+        Parameters
+        ----------
+        indices : array-like of int, optional
+            Instances to evaluate. Default: all, or a random sample of `n_points`.
+        n_points : int, optional
+            If given (and `indices` is None), evaluate this many random instances.
+        test_size : float, default=0.3
+            Fraction of each neighborhood held out for testing.
+        random_state : int, default=0
+            Seed for the instance sample and the train/test splits.
+        baseline : bool, default=False
+            If True, repeat the check with the rows of the embedding randomly
+            permuted (an embedding unrelated to the data) and report the result
+            as the chance level. Doubles the run time.
+
+        Returns
+        -------
+        dict with keys:
+            "indices"      — the evaluated instances
+            "cosine"       — per-instance mean cosine similarity
+            "pearson"      — per-instance Pearson correlation of displacement lengths
+                             (NaN when it is undefined)
+            "mean_cosine"  — average of "cosine"
+            "mean_pearson" — average of "pearson", ignoring NaN
+            "baseline_cosine", "baseline_pearson" — the two averages for the permuted
+                             embedding (only when baseline=True)
+        '''
+        if not (0.0 < test_size < 1.0):
+            raise ValueError(f"test_size must be between 0 and 1; got {test_size!r}.")
+
+        rng = np.random.default_rng(random_state)
+        if indices is None:
+            indices = np.arange(self.n_samples)
+            if n_points is not None and n_points < self.n_samples:
+                indices = np.sort(rng.choice(self.n_samples, int(n_points), replace=False))
+        indices = np.asarray(indices, dtype=int)
+
+        k = self.n_samples if self.n_neighbors is None else self.n_neighbors
+        n_test = int(round(test_size * (k - 1)))
+        if n_test < 1 or (k - 1 - n_test) < 2:
+            raise ValueError(
+                f"A neighborhood of {k} points is too small to hold out {test_size:.0%} of it; "
+                "use a larger n_neighbors."
+            )
+
+        if self.n_neighbors is not None:
+            table = self._neighbor_index().kneighbors(
+                self.high_dim_data[indices], n_neighbors=self.n_neighbors, return_distance=False
+            )
+
+        def nanmean(v):
+            return float(np.nanmean(v)) if np.isfinite(v).any() else float("nan")
+
+        def holdout(low_dim, desc):
+            cosine  = np.full(len(indices), np.nan)
+            pearson = np.full(len(indices), np.nan)
+            for n, i in enumerate(tqdm(indices, desc=desc, unit="instance")):
+                nbrs = np.arange(self.n_samples) if self.n_neighbors is None else table[n]
+                nbrs = rng.permutation(nbrs[nbrs != i])
+                test, train = nbrs[:n_test], nbrs[n_test:]
+                x, y = self.high_dim_data[i], low_dim[i]
+
+                jac = self._estimate_jacobian(
+                    x, y, self.high_dim_data[train], low_dim[train]
+                ).astype(np.float64)
+
+                predicted = (self.high_dim_data[test] - x) @ jac.T
+                actual    = low_dim[test] - y
+                len_p     = np.linalg.norm(predicted, axis=1)
+                len_a     = np.linalg.norm(actual, axis=1)
+
+                cosine[n] = np.mean(np.sum(predicted * actual, axis=1) / (len_p * len_a + _EPS))
+                if n_test > 2 and len_p.std() > 0 and len_a.std() > 0:
+                    pearson[n] = np.corrcoef(len_p, len_a)[0, 1]
+            return cosine, pearson
+
+        verbose, self.verbose = self.verbose, False
+        try:
+            cosine, pearson = holdout(self.low_dim_data, "[FADEx] Checking fit quality")
+            result = {
+                "indices":      indices,
+                "cosine":       cosine,
+                "pearson":      pearson,
+                "mean_cosine":  nanmean(cosine),
+                "mean_pearson": nanmean(pearson),
+            }
+            if baseline:
+                shuffled = self.low_dim_data[rng.permutation(self.n_samples)]
+                b_cos, b_pear = holdout(shuffled, "[FADEx] Chance level (permuted embedding)")
+                result["baseline_cosine"]  = nanmean(b_cos)
+                result["baseline_pearson"] = nanmean(b_pear)
+        finally:
+            self.verbose = verbose
+
+        return result
 
     def fit_cluster(self, cluster_ids: np.ndarray, n_top: int = 10,
                     show: bool = False, save_fig: bool = False) -> Dict:

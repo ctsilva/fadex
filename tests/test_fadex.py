@@ -40,7 +40,7 @@ def test_integer_input_gives_the_same_scores_as_float_input():
 
 def test_importance_formula_for_a_2d_layout(data):
     X, Y = data
-    out = FADEx(X, Y, n_neighbors=40).fit(3, show=False)
+    out = FADEx(X, Y, n_neighbors=40, reference="zero").fit(3, show=False)
     _, S, Vt = np.linalg.svd(out["jac"].astype(np.float64), full_matrices=False)
     expected = np.abs(Vt[0] * X[3]) + (S[1] / S[0]) * np.abs(Vt[1] * X[3])
     assert np.allclose(out["phi"], expected, atol=1e-6)
@@ -76,7 +76,7 @@ def test_fit_cluster_uses_cache_and_returns_a_dict(data):
 def test_layouts_that_are_not_2d(data, d):
     X, Y = data
     Yd = np.c_[Y, Y[:, :1]][:, :d]
-    out = FADEx(X, Yd, n_neighbors=40).fit(0, show=False)
+    out = FADEx(X, Yd, n_neighbors=40, reference="zero").fit(0, show=False)
     assert out["jac"].shape == (d, X.shape[1])
     _, S, Vt = np.linalg.svd(out["jac"].astype(np.float64), full_matrices=False)
     expected = sum((S[i] / S[0]) * np.abs(Vt[i] * X[0]) for i in range(len(S)))
@@ -114,3 +114,71 @@ def test_nan_is_rejected(data):
     Xn[0, 0] = np.nan
     with pytest.raises(ValueError, match="NaN"):
         FADEx(Xn, Y, n_neighbors=40)
+
+
+def test_reference_mean_is_the_default_and_uses_the_displacement_from_the_mean(data):
+    X, Y = data
+    fx = FADEx(X, Y, n_neighbors=40)
+    assert np.allclose(fx.reference_point, X.mean(0))
+    out = fx.fit(3, show=False)
+    _, S, Vt = np.linalg.svd(out["jac"].astype(np.float64), full_matrices=False)
+    dx = X[3] - X.mean(0)
+    assert np.allclose(out["phi"], np.abs(Vt[0] * dx) + (S[1] / S[0]) * np.abs(Vt[1] * dx), atol=1e-6)
+
+
+def test_scores_do_not_change_when_a_constant_is_added_to_the_features(data):
+    X, Y = data
+    a = FADEx(X, Y, n_neighbors=40).fit(7, show=False)
+    b = FADEx(X + 5.0, Y, n_neighbors=40).fit(7, show=False)
+    assert np.allclose(a["phi"], b["phi"], atol=1e-5)
+    assert np.allclose(a["jac"], b["jac"], atol=1e-5)
+    # with the raw values as reference (Eq. 6 of the paper) the scores do depend on the shift
+    c = FADEx(X, Y, n_neighbors=40, reference="zero").fit(7, show=False)
+    d = FADEx(X + 5.0, Y, n_neighbors=40, reference="zero").fit(7, show=False)
+    assert not np.allclose(c["phi"], d["phi"], atol=1e-3)
+
+
+def test_reference_does_not_change_the_jacobian_or_snd(data):
+    X, Y = data
+    ref = np.full(X.shape[1], 0.3)
+    a = FADEx(X, Y, n_neighbors=40, reference="zero").fit(2, show=False)
+    b = FADEx(X, Y, n_neighbors=40, reference=ref).fit(2, show=False)
+    assert np.array_equal(a["jac"], b["jac"]) and a["SND"] == b["SND"]
+    assert not np.allclose(a["phi"], b["phi"])
+
+
+@pytest.mark.parametrize("bad", ["median", [1.0, 2.0], np.full(8, np.nan)])
+def test_reference_validation(data, bad):
+    X, Y = data
+    with pytest.raises(ValueError, match="reference"):
+        FADEx(X, Y, n_neighbors=40, reference=bad)
+
+
+def test_fit_quality_is_perfect_on_a_linear_map_and_poor_on_noise():
+    rng = np.random.default_rng(3)
+    X = rng.normal(size=(300, 5))
+    good = FADEx(X, X @ rng.normal(size=(2, 5)).T, n_neighbors=50, ridge_lambda=1e-8).fit_quality(n_points=40, baseline=True)
+    bad = FADEx(X, rng.normal(size=(300, 2)), n_neighbors=50).fit_quality(n_points=40, baseline=True)
+    assert good["mean_cosine"] > 0.999 and good["mean_pearson"] > 0.999
+    assert good["cosine"].shape == good["indices"].shape == (40,)
+    # An unrelated embedding does not score 0 (neighbors lie towards the bulk of the data in
+    # both spaces), which is why the chance level is reported: here the two are close.
+    assert bad["mean_cosine"] < 0.7
+    assert abs(bad["mean_cosine"] - bad["baseline_cosine"]) < 0.15
+    assert good["mean_cosine"] - good["baseline_cosine"] > 0.3
+    assert abs(bad["mean_pearson"]) < 0.3
+
+
+def test_fit_quality_options(data):
+    X, Y = data
+    fx = FADEx(X, Y, n_neighbors=40)
+    q = fx.fit_quality(indices=[0, 5, 9])
+    assert list(q["indices"]) == [0, 5, 9] and np.isfinite(q["cosine"]).all()
+    again = fx.fit_quality(indices=[0, 5, 9])
+    assert np.array_equal(q["cosine"], again["cosine"])           # reproducible for a fixed seed
+    whole = FADEx(X, Y).fit_quality(n_points=5)                  # n_neighbors=None: whole dataset
+    assert np.isfinite(whole["mean_cosine"])
+    hd = FADEx(np.c_[X, np.zeros((len(X), 60))], Y, n_neighbors=40, remove_const_feat=True, use_pca=True)
+    assert np.isfinite(hd.fit_quality(n_points=5)["mean_cosine"])
+    with pytest.raises(ValueError, match="too small"):
+        FADEx(X, Y, n_neighbors=3).fit_quality()
