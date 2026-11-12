@@ -29,7 +29,7 @@ from sklearn.decomposition import PCA
 # Plotting
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
-import matplotlib.cm as cm
+from matplotlib import colormaps
 import plotly.graph_objects as go
 import colorsys
 
@@ -51,7 +51,9 @@ def _build_cmap(n=256, darken=0.90):
     Builds a customized colormap based on the Spectral_r standard colormap from
     matplotlib.
     '''
-    spectral = cm.get_cmap("Spectral_r", n)
+    # matplotlib.cm.get_cmap was removed in matplotlib 3.9; the registry
+    # (available since 3.5) works on old and new versions alike.
+    spectral = colormaps["Spectral_r"].resampled(n)
     dark_colors = []
     for i in range(n):
         r, g, b, a = spectral(i / (n - 1))
