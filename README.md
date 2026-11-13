@@ -51,6 +51,8 @@ FADEx will be published in **IEEE Transactions on Visualization and Computer Gra
 }
 ```
 
+The paper is presented at **IEEE VIS 2026**. The slides are in [`talk/`](talk/) as a Quarto reveal.js deck; run `quarto render talk/fadex-talk.qmd` to build them. An introductory deck that uses the California Housing example throughout is in [`talk-intro/`](talk-intro/).
+
 ---
 
 # Installation
@@ -128,7 +130,7 @@ print(quality["mean_cosine"], quality["baseline_cosine"])   # about 0.84 against
 
 Left: for one district in the Los Angeles area, house age gets the highest score. Middle: the Latitude vectors point from the southern group to the northern one. Right: neighborhoods stretched more (orange) or less (blue) than the median.
 
-These figures were drawn from FADEx's output with separate plotting code, so they are styled differently from the package's built-in plots, and the district shown is not the one with index 0. Nothing about t-SNE is passed to FADEx, so replacing it with another DR method changes one line.
+These figures were drawn from FADEx's output with the plotting code in [`talk/california_figs.py`](talk/california_figs.py), so they are styled differently from the package's built-in plots, and the district shown is not the one with index 0. Nothing about t-SNE is passed to FADEx, so replacing it with another DR method changes one line.
 
 ---
 
