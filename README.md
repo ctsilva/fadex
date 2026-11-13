@@ -76,6 +76,36 @@ fadex.interactive_plot()
 
 ---
 
+# Distances other than Euclidean
+
+Many DR methods can be run with another distance (for example `metric="cosine"` in UMAP or `distance="angular"` in PaCMAP). Pass the same choice to FADEx with `metric`. SND then becomes the largest displacement in the embedding **per unit of that distance**.
+
+| `metric` | Neighbors and weights | Local model | SND |
+|----------|----------------------|-------------|-----|
+| `"euclidean"` (default) | Euclidean | Jacobian over the features | Spectral norm of the Jacobian |
+| `"manhattan"` | Manhattan (L1) | Jacobian over the features | Largest column norm of the Jacobian, i.e. the longest influence vector |
+| `"cosine"` | Angle between rows | Jacobian fitted in the tangent space of the unit sphere at the instance, then mapped back to the features | Stretch per radian |
+| `"precomputed"` | The given distance matrix | Linear map fitted in local MDS coordinates | Largest singular value of that map |
+
+```python
+# A layout made with the cosine distance
+fadex = FADEx(X, Y, n_neighbors=200, metric="cosine")
+
+# Only a distance matrix is available (no features)
+fadex = FADEx(D, Y, n_neighbors=200, metric="precomputed")
+out = fadex.fit(0)            # out["SND"], out["singular_values"], out["negative_share"]
+fadex.plot_distortion()
+fadex.fit_quality(n_points=300, baseline=True)
+```
+
+- **Cosine.** Rescaling a row changes nothing: the Jacobian satisfies `J @ x = 0` and SND does not depend on the row lengths. If the DR method centers the data before measuring angles, center it the same way before calling FADEx.
+- **Precomputed.** There are no features, so `fit()` returns `"phi"` and `"jac"` as `None`, and `importance_plot`, `fit_cluster`, `plot_grid_feature_vectors` and `plot_feature_heatmap` raise an error. `fit()`, `fit_quality()`, `plot_distortion()` and `interactive_plot()` work. `"negative_share"` is 0 when the distances are Euclidean; a large value means the local coordinates distort the distances and SND is less reliable. With Euclidean distances this mode gives the same SND as `use_pca=True` on the features, up to small differences in the kernel weights.
+- **SND values are not comparable across metrics.** A unit of Manhattan distance is not a unit of Euclidean distance. `"manhattan"` takes the largest stretch over every possible direction, which is reached by changing one feature alone; `"precomputed"` with Manhattan distances only sees the directions present in the data, and is smaller.
+- **Hamming distance** on binary or one-hot data equals the squared Euclidean distance, so the neighborhoods are the same and the default metric can be used.
+- **Fit quality.** Matching the metric makes FADEx consistent with the DR method; in our tests it did not raise `fit_quality` scores. Compare each score with its own `baseline=True` value.
+
+---
+
 # FADEx Class
 
 ## Constructor
@@ -92,6 +122,7 @@ FADEx(
     ridge_lambda    = 0.1,
     verbose         = False,
     reference       = "mean",
+    metric          = "euclidean",
 )
 ```
 
@@ -114,6 +145,7 @@ FADEx(
 | `ridge_lambda` | `0.1` | Regularization strength for the weighted ridge least-squares solver |
 | `verbose` | `False` | Prints debug information during computation |
 | `reference` | `"mean"` | Reference point for the importance scores: the score of feature $j$ uses the displacement $x_j - \text{reference}_j$. `"mean"` uses the dataset mean, so scores do not change when a constant is added to a feature. `"zero"` uses the raw values, exactly as in the formula above; the two coincide for centered (e.g. standardized) data. An array with one value per feature is also accepted. The Jacobian, the influence vectors and SND do not depend on it |
+| `metric` | `"euclidean"` | Distance used in the original space: `"euclidean"`, `"manhattan"`, `"cosine"` or `"precomputed"`. It sets the neighborhoods, the kernel weights and the unit of SND. With `"precomputed"`, `high_dim_data` is an `(n_samples, n_samples)` distance matrix. See [Distances other than Euclidean](#distances-other-than-euclidean) |
 
 ---
 

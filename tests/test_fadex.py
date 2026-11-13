@@ -182,3 +182,128 @@ def test_fit_quality_options(data):
     assert np.isfinite(hd.fit_quality(n_points=5)["mean_cosine"])
     with pytest.raises(ValueError, match="too small"):
         FADEx(X, Y, n_neighbors=3).fit_quality()
+
+
+# ---------------------------------------------------------------------------
+# Distances other than Euclidean
+# ---------------------------------------------------------------------------
+
+def _pairwise(X, metric):
+    from sklearn.metrics import pairwise_distances
+    return pairwise_distances(X, metric=metric)
+
+
+def test_euclidean_is_the_default_metric_and_aliases_are_accepted(data):
+    X, Y = data
+    a = FADEx(X, Y, n_neighbors=40).fit(3, show=False)
+    b = FADEx(X, Y, n_neighbors=40, metric="L2").fit(3, show=False)
+    assert np.array_equal(a["jac"], b["jac"]) and a["SND"] == b["SND"]
+    assert FADEx(X, Y, n_neighbors=40, metric="angular").metric == "cosine"
+    with pytest.raises(ValueError, match="metric"):
+        FADEx(X, Y, n_neighbors=40, metric="chebyshev")
+
+
+def test_manhattan_uses_l1_neighbors_and_the_largest_column_norm(data):
+    X, Y = data
+    fx = FADEx(X, Y, n_neighbors=40, metric="manhattan")
+    expected = np.argsort(_pairwise(X, "manhattan")[5], kind="stable")[:40]
+    assert set(fx._neighbor_table([5])[0]) == set(expected)
+    out = fx.fit(5, show=False)
+    assert out["SND"] == pytest.approx(np.linalg.norm(out["jac"], axis=0).max())
+    # the stretch per unit of L1 distance can never exceed the stretch per unit of L2 distance
+    assert out["SND"] <= np.linalg.norm(out["jac"], ord=2) + 1e-6
+
+
+def test_manhattan_recovers_a_linear_map():
+    rng = np.random.default_rng(1)
+    X = rng.normal(size=(400, 6))
+    W = rng.normal(size=(2, 6))
+    out = FADEx(X, X @ W.T, n_neighbors=60, ridge_lambda=1e-8, metric="manhattan").fit(0, show=False)
+    assert np.allclose(out["jac"], W, atol=1e-3)
+    assert out["SND"] == pytest.approx(np.linalg.norm(W, axis=0).max(), rel=1e-3)
+
+
+def test_cosine_ignores_the_length_of_the_rows(data):
+    X, Y = data
+    scale = np.random.default_rng(4).uniform(0.5, 3.0, size=len(X))
+    a = FADEx(X, Y, n_neighbors=40, metric="cosine")
+    b = FADEx(X * scale[:, None], Y, n_neighbors=40, metric="cosine")
+    assert np.array_equal(a._neighbor_table([7]), b._neighbor_table([7]))
+    oa, ob = a.fit(7, show=False), b.fit(7, show=False)
+    assert oa["SND"] == pytest.approx(ob["SND"], rel=1e-4)
+    assert np.allclose(oa["jac"], ob["jac"] * scale[7], atol=1e-4)     # chain rule: J scales as 1 / ||x||
+    assert np.allclose(oa["jac"] @ X[7], 0, atol=1e-4)                 # moving along x does nothing
+    qa, qb = a.fit_quality(n_points=10), b.fit_quality(n_points=10)
+    assert qa["mean_cosine"] == pytest.approx(qb["mean_cosine"], abs=1e-4)
+    with pytest.raises(ValueError, match="zeros"):
+        FADEx(np.r_[X[:-1], np.zeros((1, X.shape[1]))], Y, n_neighbors=40, metric="cosine")
+
+
+def test_precomputed_recovers_the_stretch_of_a_linear_map():
+    rng = np.random.default_rng(5)
+    X = rng.normal(size=(300, 2))
+    W = np.array([[3.0, 0.0], [0.0, 0.5]])
+    fx = FADEx(_pairwise(X, "euclidean"), X @ W.T, n_neighbors=50, ridge_lambda=1e-8, metric="precomputed")
+    out = fx.fit(0, show=False)
+    assert out["phi"] is None and out["jac"] is None and out["feature_names_top"] == []
+    assert np.allclose(out["singular_values"], [3.0, 0.5], rtol=1e-4)
+    assert out["SND"] == pytest.approx(3.0, rel=1e-4)
+    assert out["mds_components"] == 2 and out["negative_share"] < 1e-8
+    q = fx.fit_quality(n_points=20, baseline=True)
+    assert q["mean_cosine"] > 0.999 and q["mean_cosine"] - q["baseline_cosine"] > 0.3
+
+
+def test_precomputed_euclidean_distances_agree_with_the_feature_based_fit(data):
+    """With Euclidean distances the local MDS is the local PCA of use_pca, up to a rotation."""
+    X, Y = data
+    feat = FADEx(X, Y, n_neighbors=60, use_pca=True)
+    pre = FADEx(_pairwise(X, "euclidean"), Y, n_neighbors=60, metric="precomputed")
+    assert np.array_equal(np.sort(feat._neighbor_table([3, 9])), np.sort(pre._neighbor_table([3, 9])))
+    a = np.array([feat.fit(i, show=False)["SND"] for i in range(30)])
+    b = np.array([pre.fit(i, show=False)["SND"] for i in range(30)])
+    assert np.allclose(a, b, rtol=0.05)
+
+
+def test_precomputed_fit_all_and_whole_dataset_neighborhood(data):
+    X, Y = data
+    D = _pairwise(X[:80], "manhattan")
+    fx = FADEx(D, Y[:80], n_neighbors=30, metric="precomputed")
+    fx._fit_all()
+    assert fx.all_norms.shape == (80,) and fx.all_phis is None and fx.all_jacs is None
+    assert fx.all_norms[4] == pytest.approx(fx.fit(4, show=False)["SND"])
+    assert fx.fit(4, show=False)["negative_share"] > 0            # L1 distances are not Euclidean
+    whole = FADEx(D, Y[:80], metric="precomputed")              # one MDS shared by all instances
+    assert np.isfinite(whole.fit(0, show=False)["SND"]) and np.isfinite(whole.fit_quality(n_points=5)["mean_cosine"])
+    for call in (lambda: fx.fit_cluster([0, 1]), lambda: fx.importance_plot(),
+                 lambda: fx.plot_feature_heatmap(0), lambda: fx.plot_grid_feature_vectors(0)):
+        with pytest.raises(ValueError, match="precomputed"):
+            call()
+
+
+@pytest.mark.parametrize("bad, match", [
+    (lambda D: D[:, :50], "square"),
+    (lambda D: D + np.triu(np.ones_like(D), 1), "symmetric"),
+    (lambda D: -D, "symmetric"),
+])
+def test_precomputed_validation(data, bad, match):
+    X, Y = data
+    D = _pairwise(X, "euclidean")
+    with pytest.raises(ValueError, match=match):
+        FADEx(bad(D), Y, n_neighbors=40, metric="precomputed")
+    with pytest.raises(ValueError, match="feature_names"):
+        FADEx(D, Y, n_neighbors=40, metric="precomputed", feature_names=list("abcdefgh"))
+
+
+def test_cosine_measures_the_stretch_per_radian():
+    """Points at angle t on rays of any length, placed at 3t: the stretch is 3 per radian."""
+    rng = np.random.default_rng(6)
+    t = rng.uniform(0.0, 2.0, size=300)
+    X = rng.uniform(0.5, 4.0, size=300)[:, None] * np.c_[np.cos(t), np.sin(t)]
+    Y = np.c_[3.0 * t, np.zeros(300)]
+    fx = FADEx(X, Y, n_neighbors=100, ridge_lambda=1e-8, metric="cosine")
+    for i in (0, 10, 200):
+        out = fx.fit(i, show=False)
+        assert out["SND"] == pytest.approx(3.0, rel=1e-3)
+        tangent = np.array([-np.sin(t[i]), np.cos(t[i])])
+        assert np.allclose(out["jac"][0] * np.linalg.norm(X[i]), 3.0 * tangent, atol=1e-3)
+    assert fx.fit_quality(n_points=20)["mean_cosine"] > 0.999

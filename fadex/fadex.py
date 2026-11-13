@@ -44,6 +44,14 @@ import warnings
 _VAR_THRESHOLD  = 1e-6    # Minimum neighborhood variance to keep a feature
 _MIN_KEEP       = 5       # Minimum number of features kept after variance filtering
 _EPS            = 1e-12   # Small epsilon to avoid division by zero
+_MDS_VARIANCE   = 0.95    # Share of the (positive) spectrum kept by the local MDS, as in use_pca
+
+_METRIC_ALIASES = {
+    "euclidean": "euclidean", "l2": "euclidean",
+    "manhattan": "manhattan", "l1": "manhattan", "cityblock": "manhattan",
+    "cosine": "cosine", "angular": "cosine",
+    "precomputed": "precomputed",
+}
 
 
 def _build_cmap(n=256, darken=0.90):
@@ -81,7 +89,7 @@ class FADEx:
                  n_neighbors: int = None, feature_names: list = None,
                  class_names: list = None, remove_const_feat: bool = False,
                  use_pca: bool = False, ridge_lambda: float = 0.1,
-                 verbose: bool = False, reference="mean"):
+                 verbose: bool = False, reference="mean", metric: str = "euclidean"):
         '''
         Local explainability method for dimensionality reduction (DR) algorithms.
 
@@ -129,6 +137,28 @@ class FADEx:
             constant added to a feature. "zero" uses the raw values, exactly as in Eq. 6
             of the paper; the two coincide when the data is centered (e.g. standardized).
             The Jacobian, the influence vectors and SND do not depend on this choice.
+
+        metric : "euclidean", "manhattan", "cosine" or "precomputed", default="euclidean"
+            Distance used in the original space. Set it to the distance the DR method was
+            run with. It defines the neighborhoods, the kernel weights and the unit of SND,
+            which is the largest displacement in the embedding per unit of this distance:
+
+            - "euclidean" : SND is the spectral norm of the Jacobian (the paper's definition).
+            - "manhattan" : SND is the largest column norm of the Jacobian (the largest
+              influence vector), i.e. the operator norm from L1 to L2.
+            - "cosine" (alias "angular") : only the direction of a row matters, and the
+              distance is the angle between rows, in radians. The neighbors of an instance
+              are expressed in the tangent space of the unit sphere at that instance (the
+              log map: direction towards the neighbor, length equal to the angle) and the
+              linear model is fitted there. SND is the stretch per radian. Rescaling a row
+              has no effect: the returned Jacobian satisfies J x = 0 and SND does not
+              depend on the row norms.
+            - "precomputed" : `high_dim_data` is a symmetric (n_samples, n_samples) distance
+              matrix and there are no features. Each neighborhood is embedded with classical
+              MDS and the linear model is fitted in those coordinates. fit() returns SND and
+              the singular values, but no importance scores and no Jacobian over features;
+              the methods that need features raise an error. `feature_names`, `reference`,
+              `remove_const_feat` and `use_pca` are not used.
         '''
 
         # Hyperparameters
@@ -163,8 +193,53 @@ class FADEx:
         if not (np.isfinite(self.high_dim_data).all() and np.isfinite(self.low_dim_data).all()):
             raise ValueError("high_dim_data and low_dim_data must not contain NaN or infinite values.")
 
+        if not isinstance(metric, str) or metric.lower() not in _METRIC_ALIASES:
+            raise ValueError(
+                'metric must be "euclidean", "manhattan", "cosine" or "precomputed"; '
+                f"got {metric!r}."
+            )
+        self.metric = _METRIC_ALIASES[metric.lower()]
+
         self.n_samples  = self.high_dim_data.shape[0]
         self.n_features = self.high_dim_data.shape[1]
+
+        # Data the neighbor search and the local fit work on (differs from
+        # high_dim_data only for the cosine metric).
+        self._work_data = self.high_dim_data
+        self._row_norms = None
+        self._global_mds = None
+
+        if self.metric == "precomputed":
+            D = self.high_dim_data
+            if D.shape[0] != D.shape[1]:
+                raise ValueError(
+                    'With metric="precomputed", high_dim_data must be a square distance '
+                    f"matrix; got shape {D.shape}."
+                )
+            scale = max(float(np.abs(D).max()), _EPS)
+            if (D < 0).any() or not np.allclose(D, D.T, atol=1e-8 * scale) \
+                    or not np.allclose(np.diag(D), 0.0, atol=1e-8 * scale):
+                raise ValueError(
+                    "A precomputed distance matrix must be symmetric and non-negative, "
+                    "with zeros on the diagonal."
+                )
+            if feature_names is not None:
+                raise ValueError('feature_names cannot be used with metric="precomputed".')
+            if remove_const_feat or use_pca:
+                warnings.warn('remove_const_feat and use_pca are ignored with metric="precomputed".')
+            self.n_features = 0
+        elif self.metric == "cosine":
+            self._row_norms = np.linalg.norm(self.high_dim_data, axis=1)
+            if (self._row_norms <= _EPS).any():
+                raise ValueError('metric="cosine" is undefined for rows that are all zeros.')
+            self._work_data = self.high_dim_data / self._row_norms[:, None]
+
+        self.snd_label = {
+            "euclidean":   "Spectral Norm",
+            "manhattan":   "Stretch per unit Manhattan distance",
+            "cosine":      "Stretch per radian",
+            "precomputed": "Stretch per unit distance",
+        }[self.metric]
 
         if n_neighbors is not None:
             if int(n_neighbors) != n_neighbors or not (2 <= n_neighbors <= self.n_samples):
@@ -191,7 +266,9 @@ class FADEx:
             )
 
         # Reference point for the importance scores
-        if isinstance(reference, str):
+        if self.metric == "precomputed":
+            self.reference_point = None
+        elif isinstance(reference, str):
             if reference == "mean":
                 self.reference_point = self.high_dim_data.mean(axis=0)
             elif reference == "zero":
@@ -292,7 +369,7 @@ class FADEx:
         The tree over the full dataset is built once and reused; building it on
         every call used to dominate the cost of fit().
         '''
-        if data is self.high_dim_data:
+        if data is self.high_dim_data and self.metric == "euclidean":
             nbrs = self._neighbor_index()
         else:
             nbrs = NearestNeighbors(algorithm='ball_tree').fit(data)
@@ -304,8 +381,130 @@ class FADEx:
         Returns the (lazily built, cached) nearest-neighbor index over high_dim_data.
         '''
         if self._nn_index is None:
-            self._nn_index = NearestNeighbors(algorithm='ball_tree').fit(self.high_dim_data)
+            # Cosine: Euclidean neighbors of the unit vectors are the cosine neighbors.
+            nn_metric = "manhattan" if self.metric == "manhattan" else "euclidean"
+            self._nn_index = NearestNeighbors(algorithm='ball_tree', metric=nn_metric).fit(self._work_data)
         return self._nn_index
+
+    def _neighbor_table(self, indices: np.ndarray) -> np.ndarray:
+        '''
+        Neighbor indices (in the chosen metric) of each instance in `indices`,
+        shape (len(indices), k). The instance itself comes first.
+        With n_neighbors=None, k is the whole dataset.
+        '''
+        indices = np.asarray(indices, dtype=int)
+        k = self.n_samples if self.n_neighbors is None else self.n_neighbors
+
+        if self.metric == "precomputed":
+            table = np.empty((len(indices), k), dtype=int)
+            for n, i in enumerate(indices):
+                order = np.argsort(self.high_dim_data[i], kind="stable")
+                table[n, 0]  = i
+                table[n, 1:] = order[order != i][:k - 1]
+            return table
+
+        if self.n_neighbors is None:
+            others = np.arange(self.n_samples)
+            return np.array([np.r_[i, others[others != i]] for i in indices])
+
+        return self._neighbor_index().kneighbors(
+            self._work_data[indices], n_neighbors=k, return_distance=False
+        )
+
+    @staticmethod
+    def _classical_mds(D: np.ndarray) -> Tuple[np.ndarray, float]:
+        '''
+        Classical (Torgerson) MDS of a distance matrix: coordinates whose Euclidean
+        distances approximate D, keeping the leading components that hold
+        _MDS_VARIANCE of the positive spectrum. For Euclidean distances this is
+        the same as the local PCA applied by use_pca.
+
+        Returns
+        -------
+        Z              : coordinates, shape (k, q)
+        negative_share : share of the spectrum that is negative (0 when D is exactly
+                         Euclidean; large values mean the coordinates distort D)
+        '''
+        D2 = np.asarray(D, dtype=np.float64) ** 2
+        B  = -0.5 * (D2 - D2.mean(axis=0)[None, :] - D2.mean(axis=1)[:, None] + D2.mean())
+        lam, V = np.linalg.eigh((B + B.T) / 2.0)
+        lam, V = lam[::-1], V[:, ::-1]
+
+        positive = lam[lam > max(lam[0], 0.0) * 1e-10]
+        if positive.size == 0:                      # all points coincide
+            return np.zeros((len(D2), 1)), 0.0
+
+        ratio = np.cumsum(positive) / positive.sum()
+        q     = min(int(np.searchsorted(ratio, _MDS_VARIANCE, side="right")) + 1, positive.size)
+        Z     = V[:, :q] * np.sqrt(lam[:q])
+        negative_share = float(-lam[lam < 0].sum() / max(np.abs(lam).sum(), _EPS))
+        return Z, negative_share
+
+    def _local_coordinates(self, idx: np.ndarray) -> Tuple[np.ndarray, float]:
+        '''
+        MDS coordinates of the instances `idx` (precomputed metric). When the whole
+        dataset is the neighborhood, one MDS is shared by all instances.
+        '''
+        if self.n_neighbors is None:
+            if self._global_mds is None:
+                self._global_mds = self._classical_mds(self.high_dim_data)
+            Z, negative_share = self._global_mds
+            return Z[idx], negative_share
+        return self._classical_mds(self.high_dim_data[np.ix_(idx, idx)])
+
+    def _local_data(self, index: int, idx: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        '''
+        The instance `index` and the instances `idx` in the coordinates the local
+        linear model is fitted in.
+
+        Cosine metric: tangent-space (normal) coordinates of the unit sphere at the
+        instance. The instance is the origin and each neighbor lies in its direction
+        at a distance equal to the angle between them, so Euclidean distances from
+        the origin are angular distances and no coordinate points along the instance
+        itself. Other metrics: the feature values.
+        '''
+        W = self._work_data
+        if self.metric != "cosine":
+            return W[index], W[idx]
+
+        u       = W[index]
+        cos     = np.clip(W[idx] @ u, -1.0, 1.0)
+        tangent = W[idx] - cos[:, None] * u[None, :]
+        length  = np.linalg.norm(tangent, axis=1)                  # sin(angle)
+        scale   = np.divide(np.arccos(cos), length, out=np.zeros_like(length), where=length > _EPS)
+        return np.zeros_like(u), tangent * scale[:, None]
+
+    def _finalize_jacobian(self, jac: np.ndarray, index: int) -> Tuple[np.ndarray, np.ndarray, float]:
+        '''
+        Turns the Jacobian fitted on the working data into the Jacobian over the
+        original features and the metric-aware distortion.
+
+        Returns
+        -------
+        jac_features : Jacobian with respect to the original features, shape (d, n_features)
+        jac_working  : Jacobian with respect to the working data (used for predictions)
+        snd          : largest embedding displacement per unit of the chosen distance
+        '''
+        if self.metric == "manhattan":
+            # sup ||J v||_2 / ||v||_1 is attained at a coordinate axis
+            return jac, jac, float(np.linalg.norm(jac, axis=0).max())
+
+        if self.metric == "cosine":
+            # The fit is in tangent coordinates, so the Jacobian has no radial part
+            # (the projection only removes rounding error). The chain rule for
+            # u = x / ||x|| then gives the Jacobian over the original features.
+            u       = self._work_data[index]
+            tangent = (jac - np.outer(jac @ u, u)).astype(jac.dtype)
+            snd     = float(np.linalg.norm(tangent, ord=2))
+            return (tangent / self._row_norms[index]).astype(jac.dtype), tangent, snd
+
+        return jac, jac, float(np.linalg.norm(jac, ord=2))
+
+    def _require_features(self, what: str) -> None:
+        if self.metric == "precomputed":
+            raise ValueError(
+                f'{what} needs feature values and is not available with metric="precomputed".'
+            )
 
     @staticmethod
     def _ridge_wls(X: np.ndarray, Y: np.ndarray, w: np.ndarray, lam: float) -> np.ndarray:
@@ -325,10 +524,14 @@ class FADEx:
         low_dim_point: np.ndarray,
         high_dim_nei: np.ndarray,
         low_dim_nei: np.ndarray,
+        distances: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         '''
         Estimates the Jacobian of the DR mapping at `high_dim_point` using
         locally-weighted ridge least squares.
+
+        `distances` are the distances to the neighbors used for the kernel
+        weights; by default the Euclidean distances in the given coordinates.
 
         Returns
         -------
@@ -344,7 +547,8 @@ class FADEx:
         delta_Y = Yn - y[None, :]   # (k, d)
 
         # Gaussian distance weights
-        distances          = np.linalg.norm(delta_X, axis=1)                            # (k,)
+        if distances is None:
+            distances      = np.linalg.norm(delta_X, axis=1)                            # (k,)
         positive_distances = distances[distances > 0]
         sigma              = float(max(
             np.median(positive_distances) if positive_distances.size > 0 else 1.0,
@@ -375,6 +579,7 @@ class FADEx:
         '''
         if self.all_jacs is not None:
             return self.all_jacs[idx]
+        self._require_features("The Jacobian over features")
         return self.fit(idx, show=False)['jac']
 
     def _resolve_feature(self, feature) -> Tuple[int, str]:
@@ -460,6 +665,11 @@ class FADEx:
         -------
         jac : np.ndarray, shape (d, n_features)
         '''
+        # Kernel weights use the chosen metric, measured before any preprocessing
+        distances = None
+        if self.metric == "manhattan":
+            distances = np.abs(high_dim_nei - high_dim_point[None, :]).sum(axis=1)
+
         # --- Dimensionality reduction preprocessing ---
         if self.remove_const_feat:
             high_dim_point, high_dim_nei, keep_mask, _ = self._drop_const_features(
@@ -474,7 +684,8 @@ class FADEx:
         if self.verbose: print(f'[FADEx] New Dimension: {high_dim_nei.shape[1]}')
 
         # --- Jacobian estimation ---
-        jac = self._compute_jac_ls(high_dim_point, low_dim_point, high_dim_nei, low_dim_nei)
+        jac = self._compute_jac_ls(high_dim_point, low_dim_point, high_dim_nei, low_dim_nei,
+                                   distances=distances)
 
         # Validate and sanitize
         if np.any(np.isnan(jac)):
@@ -502,7 +713,8 @@ class FADEx:
           2. Optionally filter near-constant features and apply PCA.
           3. Estimate the Jacobian via weighted ridge least squares.
           4. Derive per-feature importance scores through SVD of the Jacobian.
-          5. Compute the spectral norm as a local distortion measure.
+          5. Compute the spectral norm as a local distortion measure
+             (with another `metric`: the stretch per unit of that distance).
 
         Parameters
         ----------
@@ -524,30 +736,38 @@ class FADEx:
             "SND"               — spectral norm of the Jacobian (float)
             "jac"               — full Jacobian, shape (d, n_features)
             "feature_names_top" — names of the top-n features
+
+        With metric="precomputed" there are no features: "phi" and "jac" are None,
+        "feature_names_top" is empty, and three keys are added:
+            "singular_values"   — singular values of the local linear map (the first is SND;
+                                  first / second measures how anisotropic the stretch is)
+            "mds_components"    — dimension of the local MDS coordinates
+            "negative_share"    — share of the local MDS spectrum that is negative: 0 when
+                                  the distances are Euclidean, larger when they are not and
+                                  the local coordinates distort them
         '''
-        high_dim_point = self.high_dim_data[explain_index]   # (D,)
+        if self.metric == "precomputed":
+            return self._fit_precomputed(explain_index)
+
         low_dim_point  = self.low_dim_data[explain_index]    # (d,)
 
         # --- Neighborhood selection ---
         if self.n_neighbors is None:
-            high_dim_nei = self.high_dim_data
-            low_dim_nei  = self.low_dim_data
+            idx = np.arange(self.n_samples)
+        elif self._nbr_table is not None and self._nbr_table_k == self.n_neighbors:
+            # Precomputed in one batched query by _fit_all()
+            idx = self._nbr_table[explain_index]
         else:
-            if self._nbr_table is not None and self._nbr_table_k == self.n_neighbors:
-                # Precomputed in one batched query by _fit_all()
-                idx      = self._nbr_table[explain_index]
-            else:
-                _, indices = self._nearest_neighbors(data=self.high_dim_data, point=high_dim_point)
-                idx        = indices[0] if indices.ndim == 2 else indices
-            high_dim_nei = self.high_dim_data[idx]
-            low_dim_nei  = self.low_dim_data[idx]
+            idx = self._neighbor_table([explain_index])[0]
+        high_dim_point, high_dim_nei = self._local_data(explain_index, idx)   # (D,), (k, D)
+        low_dim_nei = self.low_dim_data[idx]
 
         # --- Preprocessing, Jacobian estimation, back to the full feature space ---
         jac = self._estimate_jacobian(high_dim_point, low_dim_point, high_dim_nei, low_dim_nei)
+        jac, _, SND = self._finalize_jacobian(jac, explain_index)
 
         # --- Importance and distortion ---
-        phi           = self._compute_importance(jac, high_dim_point - self.reference_point)
-        SND = np.linalg.norm(jac, ord=2)
+        phi = self._compute_importance(jac, self.high_dim_data[explain_index] - self.reference_point)
 
         if np.isnan(SND):
             raise ValueError("Spectral Norm is NaN.")
@@ -564,6 +784,35 @@ class FADEx:
             "SND":               SND,
             "jac":               jac,
             "feature_names_top": feature_names_top,
+        }
+
+    def _fit_precomputed(self, explain_index: int) -> dict:
+        '''
+        fit() for a precomputed distance matrix: local MDS coordinates take the
+        place of the features.
+        '''
+        if self._nbr_table is not None:
+            idx = self._nbr_table[explain_index]
+        else:
+            idx = self._neighbor_table([explain_index])[0]
+
+        Z, negative_share = self._local_coordinates(idx)
+        jac = self._compute_jac_ls(
+            Z[0], self.low_dim_data[explain_index], Z, self.low_dim_data[idx],
+            distances=self.high_dim_data[explain_index, idx],
+        )
+        if not np.isfinite(jac).all():
+            raise ValueError('Non-finite values computed for the local linear map.')
+
+        singular_values = np.linalg.svd(jac, compute_uv=False)
+        return {
+            "phi":               None,
+            "SND":               float(singular_values[0]),
+            "jac":               None,
+            "feature_names_top": [],
+            "singular_values":   singular_values,
+            "mds_components":    Z.shape[1],
+            "negative_share":    negative_share,
         }
 
     def _fit_all(self) -> None:
@@ -584,9 +833,7 @@ class FADEx:
 
         # One batched neighbor query for the whole dataset instead of one per instance
         if self.n_neighbors is not None:
-            self._nbr_table   = self._neighbor_index().kneighbors(
-                self.high_dim_data, n_neighbors=self.n_neighbors, return_distance=False
-            )
+            self._nbr_table   = self._neighbor_table(np.arange(self.n_samples))
             self._nbr_table_k = self.n_neighbors
 
         try:
@@ -601,9 +848,10 @@ class FADEx:
         if switch:
             self.verbose = True
 
-        self.all_phis  = np.asarray([r["phi"]          for r in results])
         self.all_norms = np.asarray([r["SND"]          for r in results])
-        self.all_jacs  = np.asarray([r["jac"]          for r in results])
+        if self.metric != "precomputed":            # no features, so no scores or Jacobians
+            self.all_phis  = np.asarray([r["phi"]      for r in results])
+            self.all_jacs  = np.asarray([r["jac"]      for r in results])
 
     def fit_quality(self, indices=None, n_points: Optional[int] = None,
                     test_size: float = 0.3, random_state: int = 0,
@@ -676,10 +924,24 @@ class FADEx:
                 "use a larger n_neighbors."
             )
 
-        if self.n_neighbors is not None:
-            table = self._neighbor_index().kneighbors(
-                self.high_dim_data[indices], n_neighbors=self.n_neighbors, return_distance=False
-            )
+        table = self._neighbor_table(indices)
+
+        def predict(i, train, test, low_dim):
+            '''Displacements of the held-out neighbors predicted by the model fitted on `train`.'''
+            if self.metric == "precomputed":
+                # The local coordinates are built from all the neighbors (they only use
+                # the distances, not the embedding); the model is fitted on `train` alone.
+                Z, _ = self._local_coordinates(np.r_[i, train, test])
+                Ztr  = Z[1:1 + len(train)]
+                jac  = self._compute_jac_ls(Z[0], low_dim[i], Ztr, low_dim[train],
+                                            distances=self.high_dim_data[i, train])
+                return (Z[1 + len(train):] - Z[0]) @ jac.T
+
+            x, x_train = self._local_data(i, train)
+            _, x_test  = self._local_data(i, test)
+            jac = self._estimate_jacobian(x, low_dim[i], x_train, low_dim[train])
+            _, jac, _ = self._finalize_jacobian(jac.astype(np.float64), i)
+            return (x_test - x) @ jac.T
 
         def nanmean(v):
             return float(np.nanmean(v)) if np.isfinite(v).any() else float("nan")
@@ -688,17 +950,12 @@ class FADEx:
             cosine  = np.full(len(indices), np.nan)
             pearson = np.full(len(indices), np.nan)
             for n, i in enumerate(tqdm(indices, desc=desc, unit="instance")):
-                nbrs = np.arange(self.n_samples) if self.n_neighbors is None else table[n]
+                nbrs = table[n]
                 nbrs = rng.permutation(nbrs[nbrs != i])
                 test, train = nbrs[:n_test], nbrs[n_test:]
-                x, y = self.high_dim_data[i], low_dim[i]
 
-                jac = self._estimate_jacobian(
-                    x, y, self.high_dim_data[train], low_dim[train]
-                ).astype(np.float64)
-
-                predicted = (self.high_dim_data[test] - x) @ jac.T
-                actual    = low_dim[test] - y
+                predicted = predict(i, train, test, low_dim)
+                actual    = low_dim[test] - low_dim[i]
                 len_p     = np.linalg.norm(predicted, axis=1)
                 len_a     = np.linalg.norm(actual, axis=1)
 
@@ -750,6 +1007,7 @@ class FADEx:
             "phi_cluster"       — importance scores averaged over the cluster, shape (n_features,)
             "feature_names_top" — names of the top-n features
         '''
+        self._require_features("fit_cluster()")
         cluster_ids = np.asarray(cluster_ids, dtype=int)
         if cluster_ids.size == 0:
             raise ValueError("cluster_ids is empty.")
@@ -806,7 +1064,7 @@ class FADEx:
         )
 
         cbar = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
-        cbar.set_label("Spectral Norm", rotation=270, labelpad=15)
+        cbar.set_label(self.snd_label, rotation=270, labelpad=15)
         cbar.set_ticks([vmin, 1.0, vmax])
         cbar.set_ticklabels([f"{vmin:.2f}", "1.00", f"{vmax:.2f}"])
 
@@ -829,7 +1087,7 @@ class FADEx:
         showing sorted feature importances. Calls _fit_all() automatically
         if results are not yet cached.
         '''
-        if self.all_phis is None:
+        if self.all_norms is None:
             self._fit_all()
 
         width_px  = width  * 100
@@ -837,9 +1095,10 @@ class FADEx:
 
         # Build hover tooltip for each instance
         formatted_text = []
-        for i, phi_row in enumerate(self.all_phis):
+        for i in range(self.n_samples):
 
-            if show_features:
+            if show_features and self.all_phis is not None:
+                phi_row = self.all_phis[i]
                 # Sort features by absolute importance (descending)
                 sorted_features = sorted(
                     zip(self.feature_names, phi_row),
@@ -854,7 +1113,7 @@ class FADEx:
             if self.class_names is not None:
                 class_str = f"Class: {self.class_names[i]}<br>"
 
-            norm_str = f"Spectral Norm: {self.all_norms[i]:.3f}"
+            norm_str = f"{self.snd_label}: {self.all_norms[i]:.3f}"
             formatted_text.append(f"{class_str}ID: {i}<br>{norm_str}<br><br>{features_str}")
 
         norms = np.asarray(self.all_norms, dtype=float)
@@ -916,6 +1175,7 @@ class FADEx:
         save_fig : bool, default=False
             If True, saves the plot as a PDF.
         '''
+        self._require_features("importance_plot()")
         if self.all_phis is None:
             self._fit_all()
 
@@ -965,7 +1225,7 @@ class FADEx:
                  if explain_index is not None
                  else "Cluster Feature Importance")
         if spectral_norm is not None:
-            title += f" (spectral norm = {spectral_norm:.3f})"
+            title += f" ({self.snd_label.lower()} = {spectral_norm:.3f})"
         plt.title(title)
 
         plt.tight_layout()
@@ -1009,6 +1269,7 @@ class FADEx:
             If True, saves the plot as a PDF.
         """
 
+        self._require_features("plot_grid_feature_vectors()")
         feat_idx, feat_name = self._resolve_feature(feature)
         if labels is not None:
             labels = np.asarray(labels)
@@ -1133,6 +1394,7 @@ class FADEx:
             If True, saves the plot as a PDF.
         """
         # --- Feature validation ---
+        self._require_features("plot_feature_heatmap()")
         feature_idx, feature_name = self._resolve_feature(feature)
 
         # --- Ensure all phis are computed ---
