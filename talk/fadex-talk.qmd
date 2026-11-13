@@ -101,7 +101,7 @@ is one set per point.
 Visibly separated groups are not the same as a more faithful picture; that is one reason
 to ask where the layout is stretched.
 
-We come back to this picture: the sanity-check slide shows that FADEx, applied to this PCA
+We come back to this picture: Check 2 shows that FADEx, applied to this PCA
 layout without being told it is PCA, recovers these arrows to within 0.01.
 :::
 
@@ -345,7 +345,7 @@ centred data and differs on uncentred data. The backup slide works the score thr
 district A.
 :::
 
-## The estimate predicts held-out neighbours
+## Check 1, the fit: it predicts held-out neighbours
 
 ::: {.prov}
 Rerun of paper Fig. 2
@@ -359,8 +359,8 @@ Rerun of paper Fig. 2
 Musk Version 2, 166 features, 2,000 samples.
 
 This test evaluates the local approximation: does the fitted rule predict directions? It
-does not test whether the scores pick the right features. The synthetic slide, after the
-PCA check, does that.
+does not test whether the scores pick the right features. Check 3, after the PCA
+check, does that.
 
 This figure is our rerun of Fig. 2 of the paper. The right panel uses a neighbourhood of
 200, which is 10 percent of the sample; the paper's uses 247. The values still agree with
@@ -394,7 +394,7 @@ neighbours.
 For the California layout from the opening, the same test gives 0.84.
 :::
 
-## Sanity check: on PCA, FADEx recovers PCA's own arrows
+## Check 2, the fit: on PCA, it recovers PCA's own arrows
 
 ::: {.prov}
 Additional example
@@ -422,7 +422,7 @@ is exactly linear.
 This is still a test of the fit. The next slide tests the scores.
 :::
 
-## The scores recover features we planted
+## Check 3, the scores: they recover features we planted
 
 ::: {.prov}
 Rerun of paper Fig. 3
@@ -474,7 +474,7 @@ If asked about the neighbourhood: the paper says 20 neighbours, "10% of the data
 of 2,000 is 1 percent. Both 20 and 200 recover the structure in our rerun.
 :::
 
-## SND measures maximum local stretch
+## SND on MNIST: it measures maximum local stretch
 
 ::: {.prov}
 Rerun of paper Fig. 4
@@ -522,7 +522,7 @@ Hypertrix: a global PCA above 50 dimensions, no chain rule back to the original 
 and neighbours taken in the projected space.
 :::
 
-## One score per feature also works for images
+## Cats and dogs: one score per feature also works for images
 
 ::: {.prov}
 Paper, Fig. 9
@@ -549,7 +549,7 @@ D: a cat inside the dog group. The scores light up its legs. B is a nearby dog, 
 by its legs. That is why they sit together.
 :::
 
-## Same data, three DR methods, one explainer
+## Dry Bean, 1: same data, four DR methods, one explainer
 
 ::: {.prov}
 Rerun of paper Fig. 8
@@ -588,7 +588,7 @@ Spearman correlation between methods' score vectors runs from 0.65 (t-SNE and LL
 UMAP).
 :::
 
-## They agree on what matters, not on how
+## Dry Bean, 2: they agree on what matters, not on how
 
 ::: {.prov}
 Rerun of paper Fig. 8
@@ -668,7 +668,7 @@ Check it is in the released version before recommending it.
 ## Takeaways and future work
 
 * One local linear model per point gives **scores**, **influence vectors** and a **distortion map**
-* It needs only the data and the layout, so it works with any DR method
+* It needs only the **data** and the **layout**, so it works with any DR method
 * One score per feature, at the lowest time and memory cost in our benchmarks
 * **Limits:** it assumes a locally smooth layout, and in high dimensions it relies on local PCA
 
@@ -712,7 +712,7 @@ csilva@nyu.edu
 :::
 ::::
 
-Given a dataset and its layout, FADEx estimates **which** features matter locally, **how** they act, and **where** the layout is stretched.
+**Summary:** Given a dataset and its layout, FADEx estimates **which** features matter locally, **how** they act, and **where** the layout is stretched.
 
 ::: {style="font-size: 0.75em; margin-top: 1.2em;"}
 Supported by **FAPESP** (grants 2022/09091-8, 2025/10383-1 and 2025/18911-7), **CNPq** (grant 307184/2021-8), the **Paulo Pinheiro de Andrade Fellowship**, **NSF** (grant OAC-2411221) and the **DARPA** expMath program.
