@@ -19,7 +19,11 @@ format:
 
 ## A projection shows structure, but not why
 
-**California Housing: 2,000 districts, 8 features, projected with t-SNE. It shows two groups. What are they?**
+::: {.prov}
+Additional example
+:::
+
+**California Housing: 2,000 districts, 8 features including latitude and longitude, t-SNE. What are the two groups?**
 
 :::: {.columns}
 ::: {.column width="56%"}
@@ -33,14 +37,15 @@ format:
 ::::
 
 ::: {.fragment}
-Nobody gave t-SNE a map. The layout alone does not say **which features** put each district where it is.
+The split follows geography. But the layout alone does not say **which features** put each district where it is.
 :::
 
 ::: {.notes}
 This example is not in the paper. It is a dataset anyone can load from scikit-learn, and
 one where the audience can check the answer.
 
-Each dot is a census district. The eight features: median income, house age, rooms,
+Each dot is a census district. Say the eight features aloud, because latitude and longitude
+are among them: median income, house age, rooms,
 bedrooms, population, occupancy, latitude and longitude. All standardized, t-SNE with
 perplexity 50.
 
@@ -50,7 +55,9 @@ CLICK. The same districts on the map, same colours. The left group is Los Angele
 Diego, the right group is the Bay Area, Sacramento and the Central Valley. Splitting at 36
 degrees north reproduces the grouping for 97 percent of districts.
 
-CLICK. Here we could find that out because we know California. In general the layout does
+CLICK. Here we could find that out because we know California, and because latitude and
+longitude are inputs. Which features explain one particular district's position is still
+not visible. In general the layout does
 not tell us which features drive it, how it would change if a feature changed, or whether
 the distances we see can be trusted. Those are the three questions of this talk.
 
@@ -60,11 +67,15 @@ feature and only shows global patterns. FADEx gives a ranking for each point.
 
 ## PCA is the easy case: every feature has one arrow
 
+::: {.prov}
+Additional example
+:::
+
 :::: {.columns}
 ::: {.column width="40%"}
 * The same districts with PCA: each axis is a fixed blend of the eight features
 * So each feature pushes every district in one fixed direction: raise Latitude and a district moves right and down, wherever it starts
-* t-SNE and UMAP show clearer groups, but come with no arrows
+* t-SNE and UMAP often separate groups more visibly, but come with no arrows
 * **Goal:** this kind of explanation for any projection
 :::
 ::: {.column width="60%"}
@@ -87,11 +98,18 @@ to read arrows from.
 FADEx gives arrows for any projection. They can no longer be the same everywhere, so there
 is one set per point.
 
+Visibly separated groups are not the same as a more faithful picture; that is one reason
+to ask where the layout is stretched.
+
 We come back to this picture: the sanity-check slide shows that FADEx, applied to this PCA
 layout without being told it is PCA, recovers these arrows to within 0.01.
 :::
 
 ## FADEx gives three explanations from one model
+
+::: {.prov}
+Additional example
+:::
 
 :::: {.columns}
 ::: {.column width="33%"}
@@ -100,12 +118,12 @@ layout without being told it is PCA, recovers these arrows to within 0.01.
 ![](figs/ca-which.png){height="700" fig-align="center"}
 :::
 ::: {.column width="33%"}
-**How** they act: where a point moves when a feature increases
+**How** they act: the direction the local model predicts when a feature increases
 
 ![](figs/ca-how.png){height="700" fig-align="center"}
 :::
 ::: {.column width="33%"}
-**Where** it is distorted: how much a neighbourhood is stretched
+**Where** it is stretched: the largest local stretch, relative to the median
 
 ![](figs/ca-where.png){height="700" fig-align="center"}
 :::
@@ -119,16 +137,22 @@ Left: district A is in the Los Angeles area. Its houses are 45 years old, agains
 29, and house age gets the top score, then latitude. Another district gets another ranking.
 
 Middle: the arrows for Latitude. Almost all of them point from the southern group to the
-northern one: raise a district's latitude and it moves toward Northern California. That is
-the geography from the previous slide, found without knowing the answer.
+northern one: the fitted local model predicts that a small increase in latitude moves a
+district toward Northern California. That is the geography from the previous slide. It is
+a prediction of the local model, not a rerun of t-SNE.
 
-Right: orange districts sit in neighbourhoods stretched more than the median, blue less.
-Distances in the orange regions are the ones to distrust.
+Right: orange marks neighbourhoods with a larger estimated maximum stretch than the median,
+blue a smaller one. The scale is relative, because the absolute value depends on units. A
+low value does not by itself mean the neighbourhood is shown faithfully.
 
 The rest of the talk: how these are computed, then the paper's results.
 :::
 
-## No other method offers this combination
+## FADEx in relation to prior work
+
+::: {.prov}
+Paper, Table 1
+:::
 
 | Method | Attribution | DR-agnostic | Speed | Distortion | Needs out-of-sample |
 |---|---|---|---|---|---|
@@ -142,16 +166,20 @@ The rest of the talk: how these are computed, then the paper's results.
 : {tbl-colwidths="[17,23,15,12,13,20]"}
 
 ::: {.notes}
-Three things to point at.
+Name the earlier methods and what each contributed first (one line each, below). Do not
+read every cell. Then three distinctions.
 
-Out-of-sample: perturbation methods need the DR method to project new points. t-SNE cannot.
+Out-of-sample: perturbation methods need an interface that places new points in an existing
+layout. Standard t-SNE has none. FADEx does not need one.
 
 Multiple attributions: surrogate methods give one weight per layout axis, so two numbers
 per feature. FADEx gives one.
 
-Distortion: no other attribution method reports it.
+Distortion: none of the attribution methods in this table reports it.
 
-"Faster" means time per explained instance. Backup slide has the numbers.
+"Faster" means time per explained instance. The speed labels follow Table 1 of the paper.
+The benchmark in backup covers LXDR, ClusterShapley and Corbugy; it does not include
+DimReader or FeatureClock.
 
 One line per method, if asked. DimReader: gradient-based, only partly agnostic, slow.
 FeatureClock: one score per feature and agnostic, but it fits several linear models per
@@ -162,6 +190,10 @@ derivatives of the t-SNE loss, so t-SNE only.
 :::
 
 ## The idea of FADEx: a set of arrows at every point
+
+::: {.prov}
+Additional example
+:::
 
 :::: {.columns}
 ::: {.column width="40%"}
@@ -184,46 +216,90 @@ For PCA this picture is the biplot: one set of arrows, the same everywhere. For 
 arrows differ from point to point, and that is exactly what makes it hard to read.
 :::
 
-## How FADEx works, 1: the local rule is a table of numbers
+## How FADEx works, 1: the key step is estimating the Jacobian
 
-The DR mapping $\mathcal{M}$ takes the features $\mathbf{x}$ to a 2-D position. For a small change $\mathbf{h}$:
+Near a point $\mathbf{x}$, approximate the DR mapping $\mathcal{M}$ by a linear rule: $\;\mathcal{M}(\mathbf{x}+\mathbf{h}) \approx \mathcal{M}(\mathbf{x}) + J\,\mathbf{h}$. t-SNE and UMAP give no formula for the Jacobian $J$, so FADEx fits it from the points already in the layout:
 
-$$\mathcal{M}(\mathbf{x}+\mathbf{h}) \;\approx\; \mathcal{M}(\mathbf{x}) + J_{\mathcal{M}}(\mathbf{x})\,\mathbf{h}$$
+1. Take the $k$ nearest neighbours $\mathbf{x}_\ell$ of the point $\mathbf{x}$ in the data space
+2. Look at where the projection placed them, $\mathbf{y}_\ell$
+3. Fit the $J$ that best turns differences in features into differences in position, with nearer neighbours counting more:
 
-$J$ has 2 rows and one column per feature. For district A:
+$$\min_J \;\sum_{\ell=1}^{k} w_\ell\,\bigl\|(\mathbf{y}_\ell-\mathbf{y}) - J\,(\mathbf{x}_\ell-\mathbf{x})\bigr\|^2 \;+\; \alpha\,\|J\|^2 \qquad\quad w_\ell = e^{-r_\ell^2/2\sigma^2}$$
 
-::: {style="font-size: 0.8em;"}
-| | MedInc | HouseAge | AveRooms | AveBedrms | Population | AveOccup | Latitude | Longitude |
-|---|---|---|---|---|---|---|---|---|
-| horizontal | −5.2 | −11.5 | −4.3 | −1.9 | −2.0 | 1.8 | 13.0 | −0.4 |
-| vertical | 10.5 | −0.9 | 5.9 | −2.4 | −2.3 | −4.7 | −3.5 | 0.6 |
-
-: {tbl-colwidths="[12,11,11,11,11,11,11,11,11]"}
-:::
-
-**How:** column $j$ is the influence vector of feature $j$, $\;g_j(\mathbf{x})$: where the point moves when that feature increases.
+It uses only the data and the finished layout: **no out-of-sample interface needed, any DR method**.
 
 ::: {.notes}
 M is the DR technique itself, t-SNE here, seen as a function: it takes a district's eight
 features and returns its position in the layout. We have no formula for M. We only see
 where it put each point.
 
-We approximate M near one point x by a linear map. That is the equation, a first-order
-Taylor expansion: change the features by a small h, and the position changes by J times h.
-The approximation is local. It holds for small h around this x, and every point gets its
-own J.
+We approximate M near one point x by a linear map, a first-order Taylor expansion: change
+the features by a small h, and the position changes by J times h. The approximation is
+local. It holds for small h around this x, and every point gets its own J.
 
-J is the Jacobian of M at x: how much each layout coordinate changes when each feature
-changes.
+Everything on the next two slides is read from J, so estimating J well is the core of the
+method.
 
-Read the table by column. Raise Latitude by one standard deviation and district A moves 13
-units right and 3.5 down. Raise income and it moves up. These are the arrows from the
-previous slide, as numbers.
+Step 3 is a weighted ridge least-squares fit. r is the distance from x to the neighbour,
+sigma is the median of those distances, and alpha is 0.1 by default; it keeps the system
+stable when the neighbourhood is unevenly sampled. It has a closed-form solution, one small
+linear system per point.
+
+This is also what makes the method agnostic. We never ask the DR method to place a new
+point. Standard t-SNE has no interface for that (some implementations, such as openTSNE,
+add one). We only look at where it already put the neighbours.
+
+In high dimensions we first drop locally constant features and apply a local PCA keeping
+95 percent of the variance, then map the Jacobian back with the chain rule.
+
+If asked whether this is a surrogate method like LIME: it is a local linear approximation,
+so the word fits. The difference is operational: we fit it to existing neighbours, without
+generating or projecting additional samples.
+:::
+
+## How FADEx works, 2: the local rule is a table of numbers
+
+::: {.prov}
+Additional example
+:::
+
+The fitted $J$ has 2 rows, one per layout axis, and one column per feature. For district A:
+
+::: {style="font-size: 0.8em;"}
+| | MedInc | HouseAge | AveRooms | AveBedrms | Population | AveOccup | Latitude | Longitude |
+|---|---|---|---|---|---|---|---|---|
+| horizontal | −5.2 | −11.5 | −4.3 | −1.9 | −2.0 | 1.8 | **13.0** | −0.4 |
+| vertical | 10.5 | −0.9 | 5.9 | −2.4 | −2.3 | −4.7 | **−3.5** | 0.6 |
+
+: {tbl-colwidths="[12,11,11,11,11,11,11,11,11]"}
+:::
+
+**How:** column $j$ is the influence vector of feature $j$, $\;g_j(\mathbf{x})$: the direction the local rule predicts for a small increase in that feature.
+
+Latitude: 13.0 to the right and 3.5 down per unit. That is district A's Latitude arrow.
+
+::: {.notes}
+This is the J from the previous slide, fitted for district A: how much each layout
+coordinate changes when each feature changes.
+
+Read one column, Latitude, and skip the rest. It is a local rate of change: 13 layout units
+to the right and 3.5 down per standard deviation of latitude. Features are standardized, so
+the unit is one standard deviation. That is for reading the units. The linear rule is only
+trusted for small changes, not for a full standard deviation.
+
+It is a prediction of the fitted rule, not a rerun of t-SNE with a changed district. And
+when features are correlated, read a single column with care.
+
+These columns are the arrows from the "idea" slide, as numbers.
 
 District A is the Los Angeles district from the "which" panel earlier.
 :::
 
-## How FADEx works, 2: reading scores and stretch from J
+## How FADEx works, 3: reading scores and stretch from J
+
+::: {.prov}
+Additional example
+:::
 
 :::: {.columns}
 ::: {.column width="60%"}
@@ -231,8 +307,8 @@ Decompose it: $J_{\mathcal{M}}(\mathbf{x}) = U\,\Sigma\,V^{\top}$
 
 * $J$ turns a small ball around the point into an ellipse in the layout
 * Two directions in feature space, $\mathbf{v}_1$ and $\mathbf{v}_2$, become its axes, of lengths $\lambda_1 \ge \lambda_2$
-* **Where:** distortion is the long axis, $\;\mathrm{SND}(\mathbf{x}) = \lambda_1$
-* **Which:** the score of feature $j$ is its share of those two directions, times the point's own value $x_j$:
+* **Where:** the maximum local stretch is the long axis, $\;\mathrm{SND}(\mathbf{x}) = \lambda_1$
+* **Which:** the score of feature $j$ is its share of those two directions, times the point's own standardized value $x_j$:
 
 $$\phi_j \;=\; \bigl|v_{1j}\,x_j\bigr| \;+\; \frac{\lambda_2}{\lambda_1}\,\bigl|v_{2j}\,x_j\bigr|$$
 :::
@@ -240,6 +316,8 @@ $$\phi_j \;=\; \bigl|v_{1j}\,x_j\bigr| \;+\; \frac{\lambda_2}{\lambda_1}\,\bigl|
 ![](figs/ball-to-ellipse.png){height="800" fig-align="center"}
 :::
 ::::
+
+**A feature scores high only when the layout is sensitive to it here *and* the point is unusual on it.**
 
 ::: {.notes}
 The picture uses district A's real numbers. The ball is every district that differs from A
@@ -249,63 +327,50 @@ units along the long axis, 11.6 along the short one.
 V holds the two directions in feature space that the layout can see near this point. Moving
 along anything perpendicular to both changes nothing in the layout.
 
-SND is the spectral norm of J, the largest local stretch.
+Explain the picture before the formula.
+
+SND is the spectral norm of J, the largest local stretch. It is one number for the long
+axis only. It says nothing about the short axis.
 
 Score: feature j's share of the strongest direction, plus its share of the second,
 down-weighted by the ratio of singular values. One number per feature.
 
-If asked: the score multiplies by the feature value x_j, so it depends on how features are
-scaled and centred. The backup slide works the score through for district A.
-:::
+The bottom line, with district A. Income has a long arrow here, but A's income is average,
+so its score is near zero. House age has a long arrow and A's houses are much older than
+average, so it scores highest. The score is not the arrow length.
 
-## The key step: estimating the Jacobian
-
-t-SNE and UMAP give no formula for $J$. FADEx estimates it at each point, from the points already in the layout:
-
-1. Take the $k$ nearest neighbours $\mathbf{x}_\ell$ of the point $\mathbf{x}$ in the data space
-2. Look at where the projection placed them, $\mathbf{y}_\ell$
-3. Fit the $J$ that best turns differences in features into differences in position, with nearer neighbours counting more:
-
-$$\min_J \;\sum_{\ell=1}^{k} w_\ell\,\bigl\|(\mathbf{y}_\ell-\mathbf{y}) - J\,(\mathbf{x}_\ell-\mathbf{x})\bigr\|^2 \;+\; \alpha\,\|J\|^2 \qquad\quad w_\ell = e^{-r_\ell^2/2\sigma^2}$$
-
-It uses only the data and the finished layout: **no out-of-sample mapping, any DR method**.
-
-::: {.notes}
-Everything on the previous slides is read from J, so estimating J well is the core of the
-method.
-
-Step 3 is a weighted ridge least-squares fit. r is the distance from x to the neighbour,
-sigma is the median of those distances, and alpha is 0.1 by default; it keeps the system
-stable when the neighbourhood is unevenly sampled. It has a closed-form solution, one small
-linear system per point.
-
-This is also what makes the method agnostic. We never ask the DR method to project a new
-point, which t-SNE cannot do. We only look at where it already put the neighbours.
-
-In high dimensions we first drop locally constant features and apply a local PCA keeping
-95 percent of the variance, then map the Jacobian back with the chain rule.
-
-If asked whether this is a surrogate method like LIME: no. It does not sample or perturb
-points. J is fitted to existing points and to where the layout already put them.
+The features are standardized, so x_j is the distance from the average district. The
+package by default measures x_j from the dataset mean; that equals the paper's formula on
+centred data and differs on uncentred data. The backup slide works the score through for
+district A.
 :::
 
 ## The estimate predicts held-out neighbours
 
-**Fit on 70% of a point's neighbours, predict the other 30%: directions agree, with cosine similarity near 0.9.**
+::: {.prov}
+Rerun of paper Fig. 2
+:::
+
+**Fit on 70% of neighbours, predict the rest: directions agree in most settings; the test shows where they fail.**
 
 ![](figs/jacobian-quality.png){fig-align="center"}
 
 ::: {.notes}
 Musk Version 2, 166 features, 2,000 samples.
 
+This test evaluates the local approximation: does the fitted rule predict directions? It
+does not test whether the scores pick the right features. The synthetic slide, after the
+PCA check, does that.
+
 This figure is our rerun of Fig. 2 of the paper. The right panel uses a neighbourhood of
 200, which is 10 percent of the sample; the paper's uses 247. The values still agree with
 the paper's to within 0.03 on average.
 
 Left, UMAP: similarity against neighbourhood size. A neighbourhood of about 10 percent of
-the dataset works well; the dashed vertical line marks 200. The dashed orange line is the
-chance level: the same test on a layout whose rows have been shuffled scores about 0.5, not
-0, so read the curves against that line.
+the dataset works well; the dashed vertical line marks 200. The dashed orange line is a
+baseline: the same test on a layout whose rows have been shuffled scores about 0.5, not 0.
+It was computed at a neighbourhood size of 200 only and is drawn across the plot as a
+guide, so it is not an exact chance level for the other sizes.
 
 Right: four DR methods against their own neighbourhood parameter (perplexity for t-SNE).
 Smoother layouts are easier to linearize. LLE with few neighbours is the hard case: 0.23 to
@@ -331,6 +396,10 @@ For the California layout from the opening, the same test gives 0.84.
 
 ## Sanity check: on PCA, FADEx recovers PCA's own arrows
 
+::: {.prov}
+Additional example
+:::
+
 **Where we know the answer, FADEx finds it. On t-SNE, the same feature gets a different arrow in each region.**
 
 ![](figs/lat-pca-vs-tsne.png){fig-align="center"}
@@ -349,15 +418,73 @@ Each arrow is the average over the districts in a grid cell.
 
 On PCA the hold-out cosine similarity from the previous slide is 1.00, because the mapping
 is exactly linear.
+
+This is still a test of the fit. The next slide tests the scores.
 :::
 
-## SND shows where the layout is distorted
+## The scores recover features we planted
+
+::: {.prov}
+Rerun of paper Fig. 3
+:::
+
+**12 features, 3 clusters, each shifted in 4 known features: the block diagonal matches the ground truth.**
+
+![](figs/synthetic.png){fig-align="center"}
+
+::: {.notes}
+SAY: "The last two slides tested the fit. This one tests the scores. We built data where we
+know the answer: three clusters, each made by shifting four features we chose. FADEx sees
+only the data and the layout. On the right, the scores it gives each cluster light up
+exactly the four features we shifted, and nothing else. On the left, grouping points by
+their scores alone recovers the three clusters."
+
+The question: do the features with high scores actually matter? The previous two slides
+tested only the local fit, which says nothing about whether the scores pick the right features.
+
+"Planted" means we built the answer in. Each cluster differs from the rest only in four
+features we chose, so for every point we know which features set it apart. FADEx was not
+told the clusters or which features were shifted.
+
+Left: the UMAP layout. The colours come from grouping points by their score vectors alone,
+with no labels and no positions. They match the three blobs: purity 1.00, 1.00 and 0.99 in
+this run; the paper reports 1.00, 1.00 and 0.94. Points built the same way get the same
+explanation.
+
+Right: the mean score of each feature within each group. The dark squares run down the
+diagonal: the first group scores high only on features 0 to 3, the second only on 4 to 7,
+the third only on 8 to 11. Those are the features we shifted.
+
+Our rerun of Fig. 3 of the paper.
+
+The setup. 2,000 points, 12 features, uniform between 0 and 1. Three clusters of 250, 500
+and 1,250 points, each made by shifting four features by 2 with unit Gaussian noise: C0 in
+features 0 to 3, C1 in 4 to 7, C2 in 8 to 11 (shifted downward). So we know which features
+set each cluster apart. UMAP with 15 neighbours, FADEx on every point, then k-means with
+k = 3 on the score vectors alone. No labels and no layout go into the clustering.
+
+If asked why scores inside a block are unequal: with noise of 1 against a shift of 2, the
+clusters still partly overlap.
+
+If asked why the C2 block is paler (my reading, not in the paper): the score multiplies by
+the feature's own value, and C2's shifted values, around minus 1.5, are closer to zero than
+those of C0 and C1, around 2.5.
+
+If asked about the neighbourhood: the paper says 20 neighbours, "10% of the data", but 20
+of 2,000 is 1 percent. Both 20 and 200 recover the structure in our rerun.
+:::
+
+## SND measures maximum local stretch
+
+::: {.prov}
+Rerun of paper Fig. 4
+:::
 
 :::: {.columns}
 ::: {.column width="40%"}
-* SND is the largest local stretch of the mapping: higher means the neighbourhood is pulled apart more
-* MNIST with t-SNE, panel B: distortion comes mostly from stretching
-* Panel C: a high-SND point has its true neighbours scattered across the layout; a low-SND point keeps them together
+* SND is the largest local stretch of the fitted mapping, in layout units per data unit: compare values within one layout
+* MNIST with t-SNE, panel B: SND at every point
+* Panel C, the two extremes: the highest-SND point has its true neighbours scattered across the layout; the lowest keeps them together
 :::
 ::: {.column width="60%"}
 ![](figs/snd-mnist.png){height="760" fig-align="center"}
@@ -374,6 +501,10 @@ high-SND point they land all over the map.
 
 Quantitatively, SND correlates with the distance preservation ratio: 0.86 to 0.92 on Wine,
 Breast Cancer, Dermatology and Dry Bean, lower on the very high-dimensional sets.
+
+What SND is not: a full measure of distortion. A neighbourhood can be squeezed hard in one
+direction and still have a moderate SND, so a low value does not establish that the
+neighbourhood is faithful.
 
 If asked what "1" means: SND compares layout units to data units, so the threshold depends
 on how both are scaled. Read the map as relative unless you normalize.
@@ -393,7 +524,11 @@ and neighbours taken in the projected space.
 
 ## One score per feature also works for images
 
-**Cats and dogs under t-SNE: scores mapped back to the image show what placed it (fences, faces, legs).**
+::: {.prov}
+Paper, Fig. 9
+:::
+
+**Cats and dogs under t-SNE: the top-scoring network features, drawn on each image, mark fences, faces and legs.**
 
 ![](figs/cats-dogs.png){fig-align="center"}
 
@@ -404,14 +539,21 @@ Pipeline: fine-tuned VGG16, last convolutional layer, 512 feature maps of 7 by 7
 pooled to 512 features, t-SNE with perplexity 100. The top-10 FADEx features are upsampled
 and overlaid as a heat map.
 
-A and H: the small clusters at the top are images with wire fences. t-SNE placed them by the
-fence, not the animal, so cats and dogs mix there.
+FADEx scores the 512 network features, not pixels. The heat map shows where the top ten
+are active in the image. Present it as an interpretation supported by those features.
+
+A and H: the small clusters at the top are images with wire fences. The fence features score
+highest there, not the animal's, and cats and dogs mix.
 
 D: a cat inside the dog group. The scores light up its legs. B is a nearby dog, also placed
 by its legs. That is why they sit together.
 :::
 
 ## Same data, three DR methods, one explainer
+
+::: {.prov}
+Rerun of paper Fig. 8
+:::
 
 :::: {.columns}
 ::: {.column width="33%"}
@@ -448,7 +590,11 @@ UMAP).
 
 ## They agree on what matters, not on how
 
-**ShapeFactor1 leads for all four methods, but its influence vectors differ by method.**
+::: {.prov}
+Rerun of paper Fig. 8
+:::
+
+**ShapeFactor1 leads for all four methods; how its influence vectors vary across classes differs by method.**
 
 ![](figs/bean-cluster0.png){fig-align="center"}
 
@@ -462,6 +608,10 @@ Right: influence vectors for ShapeFactor1. t-SNE: direction shifts from class to
 longest in Barbunya and Cali, which point the same way. UMAP: similar, weaker. Isomap:
 most classes point the same way, which fits its global nature. LLE: erratic, except for
 the Bombay class.
+
+Compare how the vectors vary within each layout, not their absolute direction or length
+across layouts: each layout can be rotated or mirrored and has its own units. The shared
+ranking on the left is the firmer result.
 
 So the scores say the methods agree on which features matter. The vectors show each method
 uses them differently.
@@ -562,6 +712,8 @@ csilva@nyu.edu
 :::
 ::::
 
+Given a dataset and its layout, FADEx estimates **which** features matter locally, **how** they act, and **where** the layout is stretched.
+
 ::: {style="font-size: 0.75em; margin-top: 1.2em;"}
 Supported by **FAPESP** (grants 2022/09091-8, 2025/10383-1 and 2025/18911-7), **CNPq** (grant 307184/2021-8), the **Paulo Pinheiro de Andrade Fellowship**, **NSF** (grant OAC-2411221) and the **DARPA** expMath program.
 :::
@@ -577,6 +729,10 @@ validation, cost table, Dry Bean cluster 1.
 :::
 
 ## Backup: the importance score, step by step
+
+::: {.prov}
+Additional example
+:::
 
 :::: {.columns}
 ::: {.column width="56%"}
@@ -619,6 +775,10 @@ So the score is not the arrow length: the "which" and "how" pictures can disagre
 
 ## Backup: influence vectors on data with a known shape
 
+::: {.prov}
+Paper, Fig. 6
+:::
+
 **Interlocked 3-D rings, t-SNE: arrows turn tangent to a ring where its points run along that axis.**
 
 ![](figs/rings.png){fig-align="center"}
@@ -640,6 +800,10 @@ ring.
 :::
 
 ## Backup: Breast Cancer case study
+
+::: {.prov}
+Rerun of paper Fig. 7
+:::
 
 **UMAP, 569 samples, 30 features: at the class boundary, the area error vectors point toward the malignant group.**
 
@@ -669,6 +833,10 @@ over 10 seeds, behind texture features. So state the direction, not the rank.
 :::
 
 ## Backup: ablation test
+
+::: {.prov}
+Paper, Fig. 5
+:::
 
 **Remove the top-15 features of digit class 0: a lower silhouette means those features mattered.**
 
@@ -703,37 +871,11 @@ t-SNE number reproduced, 0.61. And the test itself uses the class labels (which 
 average, alter and score), although FADEx computes its scores without them.
 :::
 
-## Backup: recovering known feature relevance
-
-**12 features, 3 clusters, each shifted in 4 known features: the block diagonal matches the ground truth.**
-
-![](figs/synthetic.png){fig-align="center"}
-
-::: {.notes}
-Our rerun of Fig. 3 of the paper. Left: the UMAP layout, coloured by clusters found in the
-space of FADEx score vectors. Purity 1.00, 1.00 and 0.99 in this run; the paper reports
-1.00, 1.00 and 0.94.
-
-Right: the mean score per cluster.
-
-The setup. 2,000 points, 12 features, uniform between 0 and 1. Three clusters of 250, 500
-and 1,250 points, each made by shifting four features by 2 with unit Gaussian noise: C0 in
-features 0 to 3, C1 in 4 to 7, C2 in 8 to 11 (shifted downward). So we know which features
-set each cluster apart. UMAP with 15 neighbours, FADEx on every point, then k-means with
-k = 3 on the score vectors alone. No labels and no layout go into the clustering.
-
-If asked why scores inside a block are unequal: with noise of 1 against a shift of 2, the
-clusters still partly overlap.
-
-If asked why the C2 block is paler (my reading, not in the paper): the score multiplies by
-the feature's own value, and C2's shifted values, around minus 1.5, are closer to zero than
-those of C0 and C1, around 2.5.
-
-If asked about the neighbourhood: the paper says 20 neighbours, "10% of the data", but 20
-of 2,000 is 1 percent. Both 20 and 200 recover the structure in our rerun.
-:::
-
 ## Backup: cost of explaining one instance
+
+::: {.prov}
+Paper, supplement Table 1
+:::
 
 | Dataset | Metric | FADEx | LXDR | ClusterShapley | Corbugy et al. |
 |---|---|---|---|---|---|
@@ -759,6 +901,10 @@ seconds, the same ordering across datasets. The baseline columns were not rerun.
 :::
 
 ## Backup: Dry Bean, explanation cluster 1
+
+::: {.prov}
+Rerun of paper Fig. 8
+:::
 
 **Cluster 1 is mostly Seker and Horoz; its top features separate exactly those two classes.**
 

@@ -80,7 +80,7 @@ def jacobian_quality():
         a.plot(sizes, cos[:, lay.index(f"umap:{p}")], color=c, lw=3, marker="o", ms=6, label=str(p))
     a.axvline(SIZE, color=MUTED, lw=1.5, ls="--"); a.text(SIZE + 10, 0.455, "200 (10% of the data)", color=MUTED, fontsize=19, va="bottom")
     a.axhline(chance, color=ORANGE, lw=2, ls="--")
-    a.text(990, chance + 0.012, f"chance level ({chance:.2f})", color=ORANGE, fontsize=21, ha="right", va="bottom")
+    a.text(990, chance + 0.012, f"shuffled-layout baseline at size 200 ({chance:.2f})", color=ORANGE, fontsize=21, ha="right", va="bottom")
     a.set_ylim(0.44, 0.94); a.set_xlim(0, 1010)
     a.set_xlabel("Neighbourhood size used by FADEx"); a.set_ylabel("Mean cosine similarity")
     a.set_title("UMAP layouts of Musk v2", fontsize=26, pad=12)

@@ -198,3 +198,15 @@ $nyu-light-gray: #f0f0f0;
 .smaller {
   font-size: 0.9em;
 }
+// Provenance tag: where a slide's figure or numbers come from
+.reveal .slides section .prov {
+  position: absolute;
+  top: 0;
+  right: 0;
+  font-size: 0.5em;
+  color: #6d6d6d;
+  background: #f0f0f0;
+  padding: 0.15em 0.7em;
+  border-radius: 0.3em;
+  p { margin: 0; }
+}
